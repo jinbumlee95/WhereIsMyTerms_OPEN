@@ -3,10 +3,12 @@
 - 서버는 표준 라이브러리(ThreadingHTTPServer). 화면은 web_static/ 의 HTML·CSS·JS (빌드 없음).
 - POST /api/ask/stream: LangGraph 를 stream_mode=["tasks", "values"] 로 돌려, 노드가 시작·끝날 때마다
   SSE 이벤트를 보낸다 (Jev 판정처럼 몇 초 걸리는 단계도 "진행 중"으로 보인다). 마지막에 답변·인용·근거.
-- 흐름은 작업 스레드 하나에서만 돌린다 (SQLite 연결·로컬 임베딩을 한 스레드에서 쓰고, 질문은 한 번에 하나).
+- 여러 사용자가 동시에 쓴다: 작업 스레드 WORKERS 개(WIMT_WEB_WORKERS, 기본 4)가 흐름 하나를 함께 쓰고,
+  넘치는 질문은 QUEUE 개까지 기다리게 한 뒤(화면에 '앞에 n개' 상태), 그보다 많으면 503 으로 거절한다.
 """
 import json
 import logging
+import os
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -35,7 +37,8 @@ def companies(clauses: list[dict], sources: dict | None = None) -> list[dict]:
     for k, v in sorted(docs.items()):
         items = [{"path": p, "title": t, "source_url": (sources.get(p) or {}).get("source_url") or "",
                   "latest_version": (sources.get(p) or {}).get("latest_version") or ""} for p, t in sorted(v.items())]
-        out.append({"id": k, "name": S.company_name(k), "documents": items,
+        aliases = sorted({a for svc, words in S.ALIASES.items() if svc.split("/")[0] == k for a in words})
+        out.append({"id": k, "name": S.company_name(k), "documents": items, "aliases": aliases,   # 화면 검색용 (배그, 마모 …)
                     "latest_version": max((d["latest_version"] for d in items), default="")})
     return out
 
@@ -60,23 +63,37 @@ def step_info(result: dict) -> dict:
     return info
 
 
+WORKERS = int(os.environ.get("WIMT_WEB_WORKERS") or 4)   # 동시에 처리하는 질문 수 (여러 사용자)
+QUEUE = WORKERS * 2                                        # 처리 중인 질문 외에 기다릴 수 있는 질문 수
+
+
 class WebApp:
-    def __init__(self, clauses: list[dict], make_app, documents: list[dict] | None = None):
-        """make_app() -> 컴파일된 흐름. 작업 스레드 안에서 처음 한 번 부른다 (임베딩 모델 등을 그 스레드에서 연다).
+    def __init__(self, clauses: list[dict], make_app, documents: list[dict] | None = None,
+                 workers: int = WORKERS, queue: int = QUEUE):
+        """make_app() -> 컴파일된 흐름. 한 번만 만들어 모든 작업 스레드가 함께 쓴다 (검색기는 읽기 전용,
+        SQLite 는 스레드 공유 연결, 로컬 임베딩 모델과 법령 캐시는 각자 잠금으로 보호한다).
+        동시에 workers 개를 처리하고 queue 개까지 기다리게 하며, 그보다 많으면 거절한다.
         documents: 이력 DB 의 문서 목록 (원문 주소 source_url, 최근 개정일 latest_version)."""
         self.sources = {d["path"]: d for d in documents or []}
         self.companies = companies(clauses, self.sources)
         self.allowed = {c["id"] for c in self.companies}
         self.make_app, self.app = make_app, None
-        self.worker = ThreadPoolExecutor(max_workers=1)
-        self.busy = threading.Lock()
+        self.workers = workers
+        self.worker = ThreadPoolExecutor(max_workers=workers)
+        self.slots = threading.BoundedSemaphore(workers + queue)
+        self.build_lock, self.count_lock = threading.Lock(), threading.Lock()
+        self.inflight = 0                     # 받아서 아직 끝나지 않은 질문 (처리 중 + 대기)
+
+    def flow_app(self):
+        """흐름을 처음 한 번만 만든다 (여러 스레드가 동시에 불러도 한 번)."""
+        with self.build_lock:
+            if self.app is None:
+                self.app = self.make_app()
+            return self.app
 
     def warm(self):
         """서버를 띄우자마자 작업 스레드에서 흐름을 만든다 (검색기·임베딩 준비에 몇 초 걸린다)."""
-        def build():
-            if self.app is None:
-                self.app = self.make_app()
-        return self.worker.submit(build)
+        return self.worker.submit(self.flow_app)
 
     def check(self, body) -> tuple[str, str | None, bool]:
         if not isinstance(body, dict):
@@ -89,20 +106,23 @@ class WebApp:
         return question.strip(), company, bool(body.get("all_companies"))
 
     def ask_stream(self, question: str, company: str | None, all_companies: bool = False):
-        """이벤트를 차례로 내놓는다: step(running/done) … result 또는 error. busy 면 BlockingIOError."""
-        if not self.busy.acquire(blocking=False):
-            raise BlockingIOError("다른 질문을 처리하고 있습니다. 잠시 후 다시 보내 주세요.")
+        """이벤트를 차례로 내놓는다: status … step(running/done) … result 또는 error. 대기열까지 차면 BlockingIOError."""
+        if not self.slots.acquire(blocking=False):
+            raise BlockingIOError("지금 질문이 많아 받을 수 없습니다. 잠시 후 다시 보내 주세요.")
         events: queue.Queue = queue.Queue()
+        with self.count_lock:
+            ahead = self.inflight - self.workers + 1       # 이 질문 앞에서 기다리는 질문 수 (0 이하면 바로 시작)
+            self.inflight += 1
+        if ahead > 0:
+            events.put({"type": "status", "message": f"다른 질문을 처리하고 있어 잠시 기다립니다… (앞에 {ahead}개)"})
         if self.app is None:                  # 준비(warm)가 아직 안 끝났으면 기다리는 이유를 먼저 알린다
             events.put({"type": "status", "message": "검색기를 준비하고 있습니다… (서버를 켠 뒤 처음 한 번)"})
 
         def run():
             try:
-                if self.app is None:
-                    self.app = self.make_app()
                 final = None
-                for mode, ev in self.app.stream(flow.start_state(question, company, all_companies),
-                                                stream_mode=["tasks", "values"]):
+                for mode, ev in self.flow_app().stream(flow.start_state(question, company, all_companies),
+                                                       stream_mode=["tasks", "values"]):
                     if mode == "values":
                         final = ev
                     elif "input" in ev:
@@ -114,8 +134,9 @@ class WebApp:
                                     "info": step_info(ev.get("result") or {})})
                 events.put({"type": "result", "answer": final.get("answer", ""), "citations": final.get("citations", []),
                             "evidence": evidence(final, self.sources), "route": final.get("route"), "choices": final.get("choices", []),
+                            "suggestions": final.get("suggestions", []),
                             "route_prob": final.get("route_prob"), "company_prob": final.get("company_prob"), "sufficient_prob": final.get("sufficient_prob"),
-                            "sufficiency_status": final.get("sufficiency_status"),
+                            "sufficiency_status": final.get("sufficiency_status"), "abstain_reason": final.get("abstain_reason"),
                             "expansions": final.get("expansions", 0), "insufficient": final.get("insufficient", False),
                             "trace": final.get("trace", [])})
             except Exception as e:           # 화면에는 짧은 설명만
@@ -124,12 +145,14 @@ class WebApp:
             finally:
                 events.put(None)
 
-        try:
-            self.worker.submit(run)
-            while (ev := events.get()) is not None:
-                yield ev
-        finally:
-            self.busy.release()
+        def done(_):
+            with self.count_lock:
+                self.inflight -= 1
+            self.slots.release()
+
+        self.worker.submit(run).add_done_callback(done)   # 브라우저가 끊겨도 흐름이 끝나야 자리를 돌려준다
+        while (ev := events.get()) is not None:
+            yield ev
 
 
 def make_handler(web: WebApp):
@@ -167,11 +190,11 @@ def make_handler(web: WebApp):
                     raise ValueError("요청이 너무 깁니다.")
                 question, company, all_companies = web.check(json.loads(self.rfile.read(n) or b"null"))
                 stream = web.ask_stream(question, company, all_companies)
-                first = next(stream)                    # busy 면 여기서 BlockingIOError
+                first = next(stream)                    # 대기열까지 차면 여기서 BlockingIOError
             except (ValueError, json.JSONDecodeError) as e:
                 return self.json(400, {"error": str(e)})
             except BlockingIOError as e:
-                return self.json(409, {"error": str(e)})
+                return self.json(503, {"error": str(e)})
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-store")

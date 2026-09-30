@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -143,6 +144,7 @@ class Client:
 
     def __init__(self, cache_dir: Path = CACHE, runner=subprocess.run, today=date.today):
         self.cache_dir, self.runner, self.today = Path(cache_dir), runner, today
+        self.lock = threading.Lock()          # 웹은 여러 스레드가 함께 쓴다: 캐시 dict·파일 추가를 보호 (같은 조문 중복 조회도 막는다)
         self.path = self.cache_dir / "articles.jsonl"
         self.cache: dict[str, dict] = {}
         if self.path.exists():
@@ -159,6 +161,10 @@ class Client:
 
     def article(self, ref: Ref) -> dict | None:
         """조문 (없으면 None). 한도 초과면 RateLimited, 그 밖의 실패는 LawError."""
+        with self.lock:
+            return self._article(ref)
+
+    def _article(self, ref: Ref) -> dict | None:
         row = self.cached(ref)
         if row is None:
             row = {"key": ref.key, "fetched": self.today().isoformat(), **self._fetch(ref)}

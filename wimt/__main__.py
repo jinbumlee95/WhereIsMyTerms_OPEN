@@ -423,10 +423,13 @@ def cmd_flow(args):
               + (f" (분기 확률 {out['route_prob']:.2f}" + (", 충분성 판정 실패" if out.get("sufficiency_status") == "unknown"
                    else f", 충분 {out['sufficient_prob']:.2f}" if "sufficient_prob" in out else "") + ")"))
     if out.get("insufficient"):
-        print("(판정 실패: 답변 보류)" if out.get("sufficiency_status") == "unknown" else "(근거 부족: 답변 보류)")
+        print({"not_found": "(약관에서 찾지 못함: 답변 보류)", "unknown": "(판정 오류: 답변 보류)"}
+              .get(out.get("abstain_reason"), "(근거 부족: 답변 보류)"))
     for c in out["citations"]:
         kind = f" {c['change_type']}" if "change_type" in c else ""
         print(f"[{c['tag']}] {c['path']} {c['clause_id']} ({c['version_date']}{kind})")
+    if out.get("suggestions"):
+        print("\n이어서 물어보기: " + " / ".join(out["suggestions"]))
 
 
 def cmd_web(args):

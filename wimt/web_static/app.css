@@ -36,7 +36,18 @@ button { font: inherit; cursor: pointer; }
 .sidebar section { margin-bottom: 24px; }
 .sidebar h2, .evidence-wrap h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 8px;
                                  text-transform: none; letter-spacing: .02em; }
-.companies { display: flex; flex-direction: column; gap: 4px; }
+.company-search { width: 100%; margin-bottom: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+                  background: var(--panel); color: var(--text); font: inherit; font-size: 14px; }
+.company-search:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.companies { display: flex; flex-direction: column; gap: 4px; max-height: 55vh; overflow-y: auto; padding-right: 2px; }
+.companies .group { margin: 8px 4px 2px; font-size: 12px; color: var(--muted); }
+.companies .empty { margin: 8px 4px; font-size: 13px; color: var(--muted); }
+.company-row { display: flex; align-items: center; gap: 2px; }
+.company-row .company { flex: 1; min-width: 0; }
+.fav { flex: none; width: 32px; height: 32px; border: none; border-radius: 8px; background: none; color: var(--muted);
+       font-size: 16px; line-height: 1; cursor: pointer; }
+.fav:hover { background: var(--panel); color: var(--warn); }
+.fav[aria-pressed="true"] { color: var(--warn); }
 .company { display: flex; justify-content: space-between; align-items: center; width: 100%; text-align: left;
            padding: 8px 12px; border: 1px solid transparent; border-radius: 8px; background: none; color: var(--text); }
 .company:hover { background: var(--panel); border-color: var(--line); }
@@ -91,6 +102,10 @@ button { font: inherit; cursor: pointer; }
 .choices button { padding: 6px 14px; border-radius: 999px; border: 1px solid var(--accent); background: var(--accent-soft);
                   color: var(--accent); font-weight: 600; font-size: 14px; }
 .choices button:hover { background: var(--accent); color: #fff; }
+.suggest { margin-top: 16px; }
+.suggest-label { font-size: 13px; color: var(--muted); }
+.suggest-label small { font-size: 12px; }
+.suggest .choices { margin-top: 6px; }
 .choices button.all { border-color: var(--line); background: none; color: var(--muted); font-weight: 400; }
 .meta { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px;
         display: flex; flex-wrap: wrap; gap: 4px 16px; }

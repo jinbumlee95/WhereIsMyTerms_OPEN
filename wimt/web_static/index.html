@@ -25,6 +25,8 @@
     <aside class="sidebar">
       <section>
         <h2>회사</h2>
+        <input id="company-search" class="company-search" type="search" placeholder="회사·서비스 찾기 (예: 배그)"
+               aria-label="회사 검색" autocomplete="off">
         <div id="companies" class="companies" role="radiogroup" aria-label="회사 선택"></div>
       </section>
       <section>
@@ -65,6 +67,10 @@
         <div id="notice" class="notice" hidden></div>
         <div id="answer" class="answer"></div>
         <div id="choices" class="choices" hidden></div>
+        <div id="suggest" class="suggest" hidden>
+          <span class="suggest-label">이어서 물어보기 <small>(새 질문으로 처리됩니다)</small></span>
+          <div id="suggest-list" class="choices"></div>
+        </div>
         <div id="meta" class="meta"></div>
         <p class="disclaimer">AI가 자동으로 만든 참고용 답변으로, 틀리거나 빠진 내용이 있을 수 있습니다. 효력을 가지는 정본은 각 기업의 공식 페이지이며, 이 답변은 법적 판단이나 권리 행사의 근거가 될 수 없습니다.
           <a href="/rules">이용 안내</a></p>

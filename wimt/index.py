@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import os
 import re
+import threading
 from pathlib import Path
 
 from .pipeline import UNFAVORABLE
@@ -133,6 +134,7 @@ class LocalEmbedder:
         from sentence_transformers import SentenceTransformer
 
         self.model, self.tokens, self.device = model, 0, "cpu"
+        self.lock = threading.Lock()
         providers = []
         try:
             import onnxruntime as ort
@@ -157,6 +159,10 @@ class LocalEmbedder:
     BUCKETS = (128, 256, 512, 768, 1024)
 
     def _encode(self, texts: list[str], prompt: str = "") -> list[list[float]]:
+        with self.lock:                      # GPU(DirectML) 세션은 동시 호출에 안전하지 않다 (웹은 여러 스레드가 함께 쓴다)
+            return self._encode_locked(texts, prompt)
+
+    def _encode_locked(self, texts: list[str], prompt: str) -> list[list[float]]:
         texts = [prompt + t for t in texts]
         lens = [len(self.st.tokenizer(t, truncation=True, max_length=self.st.max_seq_length)["input_ids"]) for t in texts]
         self.tokens += sum(lens)

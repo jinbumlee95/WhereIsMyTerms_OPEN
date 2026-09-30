@@ -3,20 +3,79 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pct = (p) => (typeof p === "number" ? p.toFixed(2) : "-");
 const INTENT = { current: "현재 약관", clause_history: "조항 변경 이력", doc_history: "문서 개정 이력" };
-const KIND = { C: "현재 조항", T: "조항 변경 이력", H: "변경 기록", D: "문서 개정일" };
+const KIND = { C: "현재 조항", T: "조항 변경 이력", H: "변경 기록", D: "문서 개정일", L: "인용 법령" };
+const ABSTAIN = {                   // 답변 보류 이유 (flow.abstain_reason)
+  not_found: "수록된 약관에서 이 질문과 관련된 내용을 찾지 못했습니다.",
+  insufficient: "관련 조항은 찾았지만, 질문 전체에 답할 만큼의 내용을 약관에서 찾지 못했습니다.",
+  unknown: "근거를 판정하는 중 오류가 나서 답변을 보류했습니다.",
+};
 
 let company = "";            // "" = 전체
 let companies = [];
 const past = [];             // 이번 세션의 질문과 결과
 
-// ------------------------------------------------------------------ 회사 선택
+// ------------------------------------------------------------------ 회사 선택 (검색·즐겨찾기)
+// 즐겨찾기는 이 브라우저의 쿠키(wimt_fav)에만 둔다. 서버는 읽지 않는다.
+const FAV_COOKIE = "wimt_fav";
+const FAV_DAYS = 365;
+
+function readFavs() {
+  const m = document.cookie.match(new RegExp(`(?:^|; )${FAV_COOKIE}=([^;]*)`));
+  return m ? decodeURIComponent(m[1]).split(",").filter(Boolean) : [];
+}
+
+function writeFavs(ids) {
+  document.cookie = `${FAV_COOKIE}=${encodeURIComponent(ids.join(","))}; max-age=${FAV_DAYS * 86400}; path=/; SameSite=Lax`;
+}
+
+function toggleFav(id) {
+  const favs = readFavs();
+  writeFavs(favs.includes(id) ? favs.filter((x) => x !== id) : [...favs, id]);
+  renderCompanies();
+}
+
+// 회사 이름·폴더 이름·별칭(배그, 마모 …)·문서 제목으로 찾는다 ("마비노기" -> 넥슨). 띄어쓰기·대소문자는 무시
+const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
+function matches(c, q) {
+  return !q || [c.name, c.id, ...(c.aliases || []), ...c.documents.map((d) => d.title)].some((s) => norm(s).includes(q));
+}
+
+function companyRow(c, favs) {
+  const fav = favs.includes(c.id);
+  return `<div class="company-row"><button type="button" class="company" role="radio" data-id="${esc(c.id)}"
+      aria-checked="${c.id === company}">${esc(c.name)} <small>문서 ${c.documents.length}</small></button>
+    <button type="button" class="fav" data-fav="${esc(c.id)}" aria-pressed="${fav}"
+      title="${fav ? "즐겨찾기에서 빼기" : "즐겨찾기에 추가"}" aria-label="${esc(c.name)} ${fav ? "즐겨찾기에서 빼기" : "즐겨찾기에 추가"}">${fav ? "★" : "☆"}</button></div>`;
+}
+
+function renderCompanies() {
+  const q = norm($("company-search").value);
+  const favs = readFavs().filter((id) => companies.some((c) => c.id === id));
+  const shown = companies.filter((c) => matches(c, q));
+  const starred = favs.map((id) => shown.find((c) => c.id === id)).filter(Boolean);
+  const rest = shown.filter((c) => !favs.includes(c.id));
+  const all = { id: "", name: "전체", documents: companies.flatMap((c) => c.documents) };
+  let html = q ? "" : `<div class="company-row"><button type="button" class="company" role="radio" data-id=""
+      aria-checked="${company === ""}">전체 <small>문서 ${all.documents.length}</small></button></div>`;
+  if (starred.length) html += `<p class="group">즐겨찾기</p>` + starred.map((c) => companyRow(c, favs)).join("");
+  if (rest.length) html += (starred.length ? `<p class="group">회사</p>` : "") + rest.map((c) => companyRow(c, favs)).join("");
+  if (!shown.length) html += `<p class="empty">'${esc($("company-search").value)}'에 맞는 회사가 없습니다</p>`;
+  const box = $("companies");
+  box.innerHTML = html;
+  box.querySelectorAll(".company").forEach((b) => b.addEventListener("click", () => selectCompany(b.dataset.id)));
+  box.querySelectorAll(".fav").forEach((b) => b.addEventListener("click", () => toggleFav(b.dataset.fav)));
+}
+
 async function loadCompanies() {
   companies = await (await fetch("/api/companies")).json();
-  const box = $("companies");
-  const all = [{ id: "", name: "전체", documents: companies.flatMap((c) => c.documents) }, ...companies];
-  box.innerHTML = all.map((c) => `<button type="button" class="company" role="radio" data-id="${esc(c.id)}"
-      aria-checked="${c.id === company}">${esc(c.name)} <small>문서 ${c.documents.length}</small></button>`).join("");
-  box.querySelectorAll(".company").forEach((b) => b.addEventListener("click", () => selectCompany(b.dataset.id)));
+  $("company-search").addEventListener("input", renderCompanies);
+  $("company-search").addEventListener("keydown", (e) => {   // Enter: 첫 번째 결과 선택
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const first = $("companies").querySelector(".company");
+    if (first) selectCompany(first.dataset.id);
+  });
+  renderCompanies();
 }
 
 function selectCompany(id) {
@@ -57,7 +116,7 @@ function detail(node, info, count) {
     case "laws": return `조문 ${info.fetched.length}건` + (info.missing.length ? ` · 없음 ${info.missing.length}` : "")
       + (info.errors.length ? ` · 실패 ${info.errors.length}` : "") + (count > 1 ? ` (${count}번째)` : "");
     case "check_context": return info.status === "unknown" ? "판정 실패" : `충분 ${pct(info.sufficient)}`;
-    case "abstain": return info.reason === "unknown" ? "판정 실패 · 답변 보류" : "근거 부족 · 답변 보류";
+    case "abstain": return { not_found: "약관에서 찾지 못함", unknown: "판정 오류 · 답변 보류" }[info.reason] || "근거 부족 · 답변 보류";
     case "expand": return `${info.round}회차` + (info.widened?.length ? ` · 범위 확대` : ` · 새 검색어`);
     case "answer": return info.insufficient ? `근거 부족 · 인용 ${info.cited}건` : `인용 ${info.cited}건`;
     case "direct_answer": return "문서 없이 답변";
@@ -107,9 +166,7 @@ function renderResult(r, question) {
   $("answer").innerHTML = renderAnswer(r.answer);
   const cited = new Set(r.citations.map((c) => c.tag));
   $("notice").hidden = !r.insufficient;
-  $("notice").textContent = r.sufficiency_status === "unknown"
-    ? "근거 판정에 실패해 답변을 보류했습니다."
-    : "찾은 자료로 질문 전체에 답하기 어려워 답변을 보류했습니다.";
+  $("notice").textContent = ABSTAIN[r.abstain_reason] || ABSTAIN.insufficient;
   $("choices").hidden = r.route !== "clarify";
   if (r.route === "clarify") {                          // 되묻기: 회사를 고르면 같은 질문을 다시 보낸다
     $("choices").innerHTML = r.choices.map((c) => `<button type="button" data-id="${esc(c.id)}">${esc(c.name)}</button>`).join("")
@@ -119,6 +176,10 @@ function renderResult(r, question) {
       ask(question, { allCompanies: !b.dataset.id });
     }));
   }
+  const more = r.suggestions || [];
+  $("suggest").hidden = !more.length;             // 추천 질문: 누르면 이전 대화 없이 새 질문으로 보낸다
+  $("suggest-list").innerHTML = more.map((q) => `<button type="button">${esc(q)}</button>`).join("");
+  $("suggest-list").querySelectorAll("button").forEach((b, i) => b.addEventListener("click", () => ask(more[i])));
   const meta = [];
   if (r.route === "direct") meta.push(`즉시 답변 (분기 ${pct(r.route_prob)})`);
   else if (r.route === "clarify") meta.push(`회사 불명 (${pct(r.company_prob)}) · 검색하지 않음`);

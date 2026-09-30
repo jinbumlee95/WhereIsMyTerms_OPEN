@@ -127,11 +127,16 @@ SUFFICIENT_QUESTION = (
     "Judge answerability, not topic relevance or the number of companies/documents. Do not use outside knowledge. "
     "A request for examples needs supported examples; a comparison, exhaustive list or superlative needs coverage "
     "of its requested scope. `available_companies` defines the indexed scope for an unnamed all-company request, "
-    "not proof that all those companies are covered. An explicit scope in the question takes precedence.",
+    "not proof that all those companies are covered. An explicit scope in the question takes precedence. "
+    "The answer reports what the terms say. When a clause itself states that a part is governed by something "
+    "outside the terms (relevant laws, an app store's or partner's policy, separately notified product conditions), "
+    "that stated deferral is the answer for that part; do not count the outside content as missing.",
     "All requested facts, conditions, exceptions, services, documents and dates can be resolved from context. "
-    "The evidence may explicitly establish that no answer exists. Cross-document reasoning is allowed when supported.",
+    "The evidence may explicitly establish that no answer exists. Parts that the terms explicitly defer to outside "
+    "rules are resolved by that deferral. Cross-document reasoning is allowed when supported.",
     "Any required part is missing, truncated, ambiguous, contradictory without resolution, or from the wrong "
-    "service/document/time. Merely related text or absence of a retrieved rule is not sufficient evidence.",
+    "service/document/time. Merely related text or absence of a retrieved rule is not sufficient evidence. "
+    "A deferral covers only the part it names; a requested part that the context neither states nor defers is missing.",
 )
 
 
@@ -177,6 +182,41 @@ def keep_only(res: dict, ids: set[str]) -> dict:
             "changes": [h for h in res.get("changes", []) if "H:" + h["group"] in ids],
             "doc_versions": [d for d in res.get("doc_versions", []) if "D:" + d["path"] in ids],
             "laws": [a for a in res.get("laws", []) if "L:" + a["key"] in ids]}
+
+
+# Jev 요청 크기 (2026-09-30: 근거 21개·248KB 요청이 max_tokens_exceeded 로 400, 108KB 는 통과했다.
+# KT 개인정보처리방침 제6조 수탁사 목록 한 조항이 46,509자)
+JEV_BATCH_CHARS = 30_000   # 관련도 판정 요청 하나에 넣을 근거 본문 합계
+GRADE_DOC_CHARS = 12_000   # 관련도 판정에 보낼 근거 하나의 최대 길이 (긴 목록 조항은 앞부분으로 판정)
+CONTEXT_MAX_CHARS = 30_000 # 충분성 판정과 답변에 함께 쓰는 문맥의 최대 길이
+
+
+def clip(text: str, n: int) -> str:
+    return text if len(text) <= n else text[:n] + f"\n…(이하 {len(text) - n:,}자 생략)"
+
+
+def batches(sizes: list[int], limit: int = JEV_BATCH_CHARS) -> list[list[int]]:
+    """근거 순번을 본문 길이 합이 limit 를 넘지 않게 나눈다 (하나가 limit 보다 길면 혼자 한 묶음)."""
+    out, cur, total = [], [], 0
+    for i, n in enumerate(sizes):
+        if cur and total + n > limit:
+            out.append(cur)
+            cur, total = [], 0
+        cur.append(i)
+        total += n
+    return out + ([cur] if cur else [])
+
+
+def fit_context(res: dict, ranked: list[str], limit: int = CONTEXT_MAX_CHARS) -> tuple[str, list[dict], list[str]]:
+    """관련 근거(관련도 높은 순)로 문맥을 만들되 limit 를 넘으면 관련도가 낮은 근거부터 뺀다.
+    근거 하나만으로도 넘으면 문맥 끝을 자른다. 충분성 판정과 답변이 같은 문자열을 쓰므로 둘 다 이 결과를 쓴다."""
+    kept = list(ranked)
+    while True:
+        ctx, cites = rag.context_blocks(keep_only(res, set(kept)))
+        if len(ctx) <= limit or len(kept) <= 1:
+            break
+        kept.pop()
+    return clip(ctx, limit), cites, kept
 
 
 def cited_laws(res: dict, ids: list[str], seen: set[str]) -> list[dict]:
@@ -239,6 +279,11 @@ class State(TypedDict, total=False):
     grade_error: bool
     context: str                # 충분성 판정과 답변 생성에 쓰는 동일한 문자열
     context_citations: list
+    suggestions: list            # 답변 뒤 추천 질문 (독립 질문, 화면 버튼)
+    checked: int                 # 충분성 판정이 실제로 된 횟수 (오류 제외)
+    best_relevant: int           # 판정에 성공한 회차 중 관련 근거가 가장 많았던 수
+    sufficient_sum: float        # 판정에 성공한 충분성 점수의 합 (checked 로 나눠 평균)
+    abstain_reason: str          # not_found | insufficient | unknown
     cross: bool                  # 회사를 가리지 않은 질문이라 회사별로 모아 판정했다
     covered: int                 # 관련 근거가 나온 회사 수
     expansions: int
@@ -262,6 +307,31 @@ EXPAND_SYSTEM = """너는 한국 온라인 서비스 약관 검색기의 추가 
 - 이미 쓴 검색어와 다른 표현으로, 약관 원문에 나올 법한 말로 쓴다 (환불 → 청약철회, 환급 / 계정 정지 → 이용 제한).
 - 질문이 변경·개정·삭제·날짜를 묻거나, 현재 조항으로는 답이 안 되면 history 를 true 로 한다.
 JSON 으로만 답한다: {"queries": ["...", "..."], "history": true | false, "missing": "빠진 부분 한 줄"}"""
+
+SUGGEST_SYSTEM = """너는 한국 온라인 서비스 약관 질의응답의 추천 질문 담당이다.
+사용자의 질문, 답변, 답변에 쓴 근거 조항 제목을 보고, 사용자가 이어서 물을 만한 질문을 2~3개 만든다.
+- 각 질문은 앞 대화 없이도 이해되는 독립 질문이다. 서비스(회사) 이름을 꼭 넣는다 (예: "라이엇 환불 요청할 때 내야 하는 서류는?").
+- 근거 조항 제목으로 보아 약관에 답이 있을 법한 것만 만든다. 이미 답한 내용을 되풀이하지 않는다.
+- 사용자 말투로 짧게 (40자 이내).
+JSON 으로만 답한다: {"questions": ["...", "..."]}"""
+SUGGEST_MAX = 3
+SUGGEST_CHARS = 60
+
+
+def suggestions(raw: str, question: str) -> list[str]:
+    """추천 질문 LLM 응답 -> 질문 목록. 형식이 틀리면 빈 목록 (추천 질문은 없어도 되는 부가 기능)."""
+    try:
+        got = json.loads(raw).get("questions") or []
+    except (ValueError, AttributeError):
+        return []
+    if not isinstance(got, list):
+        return []
+    out = []
+    for q in got:
+        if isinstance(q, str) and 0 < len(q.strip()) <= SUGGEST_CHARS and q.strip() != question.strip() and q.strip() not in out:
+            out.append(q.strip())
+    return out[:SUGGEST_MAX]
+
 
 # 조건 분기: 판정 결과 -> 다음 노드. 그래프(add_conditional_edges)와 도식도(draw)가 같은 표를 쓴다
 CLASSIFY_PATHS = {"direct": "direct_answer", "clarify": "clarify", "rag": "retrieve"}
@@ -329,26 +399,31 @@ def build(retriever: "rag.Retriever", llm: "rag.LLM", judge, *, mode: str = "hyb
         items = evidence(res)
         meta = state["question_meta"]
         cross = bool(res.get("diverse"))               # 회사를 가리지 않은 질문: 회사별로 따로 판정한다
-        docs = [{k: v for k, v in e.items() if k != "id"} for e in items]
-        questions = {f"rel_{i}": (relevance_question_law if e["id"].startswith("L:") else
-                                  relevance_question_cross if cross else relevance_question)(i)
-                     for i, e in enumerate(items)}
+        docs = [{**{k: v for k, v in e.items() if k != "id"}, "text": clip(e["text"], GRADE_DOC_CHARS)} for e in items]
+        groups = batches([len(d["text"]) for d in docs])
         try:
-            got = judge({"question": state["question"], "question_meta": meta, "documents": docs}, questions) if questions else {}
-            grades = {e["id"]: probability(got[f"rel_{i}"]) for i, e in enumerate(items)}
+            for group in groups:                    # 요청 크기 제한 때문에 나눠 묻는다 (근거마다 독립 판정이라 결과는 같다)
+                questions = {f"rel_{j}": (relevance_question_law if items[i]["id"].startswith("L:") else
+                                          relevance_question_cross if cross else relevance_question)(j)
+                             for j, i in enumerate(group)}
+                got = judge({"question": state["question"], "question_meta": meta,
+                             "documents": [docs[i] for i in group]}, questions)
+                grades.update({items[i]["id"]: probability(got[f"rel_{j}"]) for j, i in enumerate(group)})
             note = {}
         except Exception as e:
             grades = {}
             note = {"error": f"{type(e).__name__}: {e}"}
-        relevant = [e["id"] for e in items if grades.get(e["id"], 0) >= RELEVANT]
+        ranked = sorted((e["id"] for e in items if grades.get(e["id"], 0) >= RELEVANT), key=lambda i: -grades[i])
+        ctx, cites, relevant = fit_context(res, ranked)
         covered = len({company_of(i) for i in relevant if not i.startswith("L:")})
-        ctx, cites = rag.context_blocks(keep_only(res, set(relevant)))
         pending = []
         if laws is not None and not note and not state.get("law_blocked") and state.get("law_rounds", 0) < MAX_LAW_ROUNDS:
             pending = cited_laws(res, relevant, set(state.get("law_seen", [])))
-        return {"grades": grades, "relevant": relevant, "cross": cross, "covered": covered,
+        best = state.get("best_relevant", 0) if note else max(state.get("best_relevant", 0), len(ranked))
+        return {"grades": grades, "relevant": relevant, "cross": cross, "covered": covered, "best_relevant": best,
                 "grade_error": bool(note), "context": ctx, "context_citations": cites, "law_pending": pending,
-                "trace": log(state, "grade", items=len(items), judged=len(questions), relevant=len(relevant),
+                "trace": log(state, "grade", items=len(items), judged=len(grades), requests=len(groups),
+                             relevant=len(relevant), dropped=len(ranked) - len(relevant),
                              cross=cross, covered=covered, laws_cited=len(pending), grades=grades, **note)}
 
     def fetch_laws(state: State) -> dict:
@@ -390,6 +465,8 @@ def build(retriever: "rag.Retriever", llm: "rag.LLM", judge, *, mode: str = "hyb
             except Exception as e:
                 status, note = "unknown", {"error": f"{type(e).__name__}: {e}"}
         return {"sufficient_prob": p, "sufficiency_status": status,
+                "checked": state.get("checked", 0) + (status != "unknown"),
+                "sufficient_sum": state.get("sufficient_sum", 0.0) + (p if status != "unknown" else 0.0),
                 "trace": log(state, "check_context", status=status, sufficient=p if status != "unknown" else None,
                              context_chars=len(state["context"]), **note)}
 
@@ -423,17 +500,22 @@ def build(retriever: "rag.Retriever", llm: "rag.LLM", judge, *, mode: str = "hyb
         system = rag.ANSWER_SYSTEM + (CROSS_NOTE if state.get("cross") else "")
         text = llm(system, f"[근거]\n{ctx}\n\n[질문]\n{state['question']}")
         used = set(re.findall(r"\[([CTHDL]\d+)\]", text))
+        # 이어서 물을 만한 독립 질문 (화면은 버튼으로, 누르면 새 질문으로 처리한다. 대화 이력은 쓰지 않는다)
+        heads = "\n".join("- " + b.split("\n", 1)[0] for b in ctx.split("\n\n---\n\n") if b)
+        try:
+            more = suggestions(llm(SUGGEST_SYSTEM, f"[질문]\n{state['question']}\n\n[답변]\n{text}\n\n[근거 조항]\n{heads}",
+                                   json_mode=True), state["question"])
+        except Exception:
+            more = []
         return {"answer": text, "citations": [c for c in cites if c["tag"] in used], "insufficient": False,
-                "trace": log(state, "answer", evidence=len(cites), cited=len(used), insufficient=False)}
+                "suggestions": more,
+                "trace": log(state, "answer", evidence=len(cites), cited=len(used), insufficient=False,
+                             suggestions=len(more))}
 
     def abstain(state: State) -> dict:
-        unknown = state["sufficiency_status"] == "unknown"
-        text = ("근거 판정에 실패해 답변을 보류했습니다. 잠시 후 다시 시도해 주세요." if unknown else
-                "추가 검색 후에도 질문 전체에 답할 충분한 근거를 확보하지 못했습니다. "
-                "회사·문서·기간이나 질문의 조건을 좁혀 다시 질문해 주세요. "
-                "자료를 찾지 못했다는 것이 해당 규정이 없다는 뜻은 아닙니다.")
-        return {"answer": text, "citations": [], "insufficient": True,
-                "trace": log(state, "abstain", reason=state["sufficiency_status"])}
+        reason = abstain_reason(state)
+        return {"answer": ABSTAIN_TEXT[reason], "citations": [], "insufficient": True, "abstain_reason": reason,
+                "trace": log(state, "abstain", reason=reason)}
 
     def after_classify(state: State) -> str:
         return state["route"]
@@ -463,6 +545,34 @@ def build(retriever: "rag.Retriever", llm: "rag.LLM", judge, *, mode: str = "hyb
     g.add_edge("answer", END)
     g.add_edge("abstain", END)
     return g.compile()
+
+
+ABSTAIN_TEXT = {
+    "not_found": "수록된 약관에서 이 질문과 관련된 내용을 찾지 못했습니다.\n\n"
+                 "약관·개인정보 처리방침·운영정책에 관한 질문이라면 회사나 서비스 이름, 궁금한 조건을 넣어 다시 질문해 주세요. "
+                 "찾지 못했다는 것이 해당 규정이 없다는 뜻은 아닙니다.",
+    "insufficient": "관련 조항은 찾았지만, 질문 전체에 답할 만큼의 내용을 약관에서 찾지 못해 답변을 보류했습니다.\n\n"
+                    "회사·문서·기간이나 조건을 좁혀 다시 질문해 주세요. 찾지 못했다는 것이 해당 규정이 없다는 뜻은 아닙니다.",
+    "unknown": "근거를 판정하는 중 오류가 나서 답변을 보류했습니다. 잠시 후 다시 시도해 주세요.",
+}
+
+
+NOT_FOUND_BELOW = 0.35  # 판정된 충분성 점수의 평균이 이보다 낮으면 "약관에서 찾지 못함"으로 안내 (안내 문구만 고른다)
+
+
+def abstain_reason(state: dict) -> str:
+    """보류 이유. 판정이 한 번이라도 됐으면 그 결과로 안내한다 (마지막 회차의 오류는 앞선 '부족' 판정을 뒤집지 않는다).
+
+    not_found: 관련 근거가 없었거나, 문맥이 질문에 거의 답하지 못했다 (충분성 평균 < NOT_FOUND_BELOW).
+      관련도 판정은 뜻 없는 질문("엄피컨")에서 흔들려 엉뚱한 조항도 0.5를 넘기므로 충분성 점수로 가른다.
+      최고점은 한 번의 흔들림(엄피컨 1회차 0.34)에 넘어가서 평균을 쓴다.
+      2026-09-30 실측 평균: "엄피컨" 0.20·0.26, 티빙 환불(관련 조항 있음) 0.51.
+    insufficient: 관련 조항은 있지만 질문 전체에 답하기엔 부족 / unknown: 판정이 한 번도 되지 않았다."""
+    if not state.get("checked"):
+        return "unknown"
+    if not state.get("best_relevant") or state.get("sufficient_sum", 0.0) / state["checked"] < NOT_FOUND_BELOW:
+        return "not_found"
+    return "insufficient"
 
 
 def run(app, question: str, company: str | None = None, all_companies: bool = False) -> dict:
