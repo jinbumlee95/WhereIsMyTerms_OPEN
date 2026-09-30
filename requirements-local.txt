@@ -1,0 +1,14 @@
+# 로컬 임베딩 (선택): python -m wimt index --model dragonkue/snowflake-arctic-embed-l-v2.0-ko
+# PyTorch 는 CPU 판을 따로 설치:
+#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+# Windows GPU(AMD·Intel·NVIDIA)는 ONNX Runtime + DirectML 로 쓴다. 버전 조합이 까다로워 고정한다:
+# - optimum 2.x 는 ONNX Runtime 연동을 optimum-onnx 로 분리했고, 그 패키지는 transformers 를 4.x 로 내려
+#   sentence-transformers 6.x 와 충돌한다 -> sentence-transformers 5.x + optimum 1.x
+# - optimum 1.x 의 ONNX 변환기는 torch 2.6 이상에서 import 가 깨진다 -> torch 2.5.1
+# - onnxruntime(CPU 판)과 onnxruntime-directml 은 같은 모듈 이름을 쓰므로 CPU 판은 설치하지 않는다
+#   (chromadb 가 onnxruntime 이 없다고 경고하지만, 기본 임베딩 함수를 안 쓰므로 괜찮다)
+-r requirements.txt
+sentence-transformers>=5.1,<6
+optimum>=1.24,<2
+onnx
+onnxruntime-directml

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>약관 질의응답 · WhereIsMyTerms</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">§</span>
+      <div>
+        <h1>WhereIsMyTerms</h1>
+        <p>약관과 변경 이력을 근거로 답합니다</p>
+      </div>
+      <nav class="tabs" aria-label="페이지">
+        <a href="/" aria-current="page">질의응답</a>
+        <a href="/rules">이용 안내</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <section>
+        <h2>회사</h2>
+        <div id="companies" class="companies" role="radiogroup" aria-label="회사 선택"></div>
+      </section>
+      <section>
+        <h2>예시 질문</h2>
+        <div class="examples">
+          <button type="button" data-q="쿠팡에서 24시간 서비스 이용할 수 있다는 내용 아직 있어?" data-c="coupang">쿠팡 24시간 이용 안내, 아직 있어?</button>
+          <button type="button" data-q="쿠팡은 해킹 피해를 책임져? 예전에 바뀐 적 있어?" data-c="coupang">쿠팡 해킹 피해 책임과 변경 이력</button>
+          <button type="button" data-q="발로란트에서 산 유료 아이템 환불 돼?" data-c="riotgames">발로란트 유료 아이템 환불</button>
+          <button type="button" data-q="KT 개인정보처리방침은 마지막으로 언제 바뀌었어?" data-c="kt">KT 개인정보처리방침 최근 개정일</button>
+          <button type="button" data-q="안녕? 뭘 물어볼 수 있어?" data-c="">인사·사용법 (즉시 답변)</button>
+        </div>
+      </section>
+      <section>
+        <h2>이번 세션의 질문</h2>
+        <ul id="history" class="history"><li class="empty">아직 없습니다</li></ul>
+      </section>
+    </aside>
+
+    <main class="main">
+      <form id="ask" class="card ask">
+        <label for="question" class="sr-only">질문</label>
+        <textarea id="question" rows="3" maxlength="2000" placeholder="환불, 개인정보, 계정 제재, 약관 변경 … 무엇이 궁금하세요?" required></textarea>
+        <div class="ask-bar">
+          <span id="scope" class="scope">전체 회사에서 찾습니다</span>
+          <span class="hint">Ctrl+Enter</span>
+          <button id="submit" type="submit">질문하기</button>
+        </div>
+      </form>
+
+      <section id="progress" class="card progress" hidden>
+        <ol id="steps" class="steps"></ol>
+        <p id="status" class="status" hidden></p>
+      </section>
+
+      <section id="error" class="card error" hidden></section>
+
+      <section id="result" class="card result" hidden>
+        <div id="notice" class="notice" hidden></div>
+        <div id="answer" class="answer"></div>
+        <div id="choices" class="choices" hidden></div>
+        <div id="meta" class="meta"></div>
+        <p class="disclaimer">AI가 자동으로 만든 참고용 답변으로, 틀리거나 빠진 내용이 있을 수 있습니다. 효력을 가지는 정본은 각 기업의 공식 페이지이며, 이 답변은 법적 판단이나 권리 행사의 근거가 될 수 없습니다.
+          <a href="/rules">이용 안내</a></p>
+      </section>
+
+      <section id="evidence-wrap" class="evidence-wrap" hidden>
+        <h2>근거 <span id="evidence-count" class="count"></span></h2>
+        <div id="evidence" class="evidence"></div>
+        <details class="trace">
+          <summary>처리 기록 (trace)</summary>
+          <pre id="trace"></pre>
+        </details>
+      </section>
+    </main>
+  </div>
+  <footer class="site-footer">
+    <p>이 서비스는 <a href="https://github.com/jinbumlee95/TOS-Korea-Project/tree/main#%EA%B6%8C%EB%A6%AC-%EA%B3%A0%EC%A7%80-%EB%B0%8F-%EC%9D%B4%EC%9A%A9-%EC%A1%B0%EA%B1%B4" target="_blank" rel="noopener">TOS-Korea-Project 「권리 고지 및 이용 조건」</a>을 따릅니다.
+      수록 문서의 권리는 각 기업에 있으며, 비영리·참고 목적으로 있는 그대로 제공합니다. 정확성을 보증하지 않으며 법률 자문이 아닙니다. <a href="/rules">서비스 이용 안내</a></p>
+  </footer>
+  <script src="app.js"></script>
+</body>
+</html>

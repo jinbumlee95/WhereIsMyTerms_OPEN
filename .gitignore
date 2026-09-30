@@ -1,0 +1,8 @@
+__pycache__/
+.env
+
+# 약관 원문이 들어 있는 로컬 산출물 (공개 저장소에 올리지 않는다 — 원문 재배포 방지)
+.cache/
+.chroma/
+reports/
+data/
