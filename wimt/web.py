@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,7 +24,7 @@ STATIC = Path(__file__).with_name("web_static")
 TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
 PAGES = {"/": "index.html", "": "index.html", "/rules": "rules.html"}   # 주소 -> 화면 파일
-STEP_NAMES = {"classify": "분기 판정", "direct_answer": "즉시 답변", "clarify": "회사 되묻기", "retrieve": "검색", "grade": "근거 판정", "laws": "법령 조회",
+STEP_NAMES = {"contextualize": "질문 이해", "classify": "분기 판정", "direct_answer": "즉시 답변", "clarify": "회사 되묻기", "retrieve": "검색", "grade": "근거 판정", "laws": "법령 조회",
               "check_context": "문맥 충분성 판정", "expand": "추가 검색", "answer": "답변", "abstain": "답변 보류"}
 
 
@@ -45,15 +46,67 @@ def companies(clauses: list[dict], sources: dict | None = None) -> list[dict]:
 
 def evidence(state: dict, sources: dict | None = None) -> list[dict]:
     """답변에 쓴 근거 (답변 LLM 에 넘긴 것과 같은 번호 [C1] …) 를 화면에 보여 줄 수 있게.
-    정본은 각 기업의 공식 페이지이므로 근거마다 원문 주소(source_url)를 붙인다."""
+    정본은 각 기업의 공식 페이지이므로 근거마다 원문 주소(source_url)를 붙인다.
+    highlights: 답변이 이 근거를 인용한 문장과 가장 비슷한 근거 문장의 위치 [[시작, 끝], …] (화면이 표시한다)."""
     if not state.get("res"):
         return []
     sources = sources or {}
     ctx, cites = rag.context_blocks(flow.keep_only(state["res"], set(state.get("relevant", []))))
     blocks = ctx.split("\n\n---\n\n") if ctx else []
-    return [{**c, "text": b.split("\n", 1)[-1] if "\n" in b else "", "head": b.split("\n", 1)[0],
-             "source_url": c.get("source_url") or (sources.get(c["path"]) or {}).get("source_url") or ""}
-            for c, b in zip(cites, blocks)]
+    items = [{**c, "text": b.split("\n", 1)[-1] if "\n" in b else "", "head": b.split("\n", 1)[0],
+              "source_url": c.get("source_url") or (sources.get(c["path"]) or {}).get("source_url") or ""}
+             for c, b in zip(cites, blocks)]
+    marks = highlights(state.get("answer") or "", {e["tag"]: e["text"] for e in items}) if state.get("citations") else {}
+    for e in items:
+        e["highlights"] = marks.get(e["tag"], [])
+    return items
+
+
+# ---------------------------------------------------------------------------
+# 근거에서 답변이 실제로 참고한 부분 (LLM 호출 없이 글자 비교로)
+# ---------------------------------------------------------------------------
+HL_MIN = 0.3          # 답변 문장과 근거 문장의 글자 2-gram 겹침(Dice) 이 이 이상이면 표시
+HL_PER_SENTENCE = 2   # 답변 문장 하나가 근거 하나에서 표시할 최대 문장 수
+TAG = re.compile(r"\[([CTHDL]\d+)\]")
+SPLIT_ANSWER = re.compile(r"(?<=[.!?。])\s+|\n+")
+SEGMENT = re.compile(r"[^\n]+?(?:[.!?。](?=\s|$)|$)", re.M)   # 근거 본문: 줄 안에서 문장 단위 (끝 문장부호 포함)
+
+
+def _grams(text: str) -> set[str]:
+    s = re.sub(r"[^0-9A-Za-z가-힣]", "", text)
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def highlights(answer: str, texts: dict[str, str]) -> dict[str, list[list[int]]]:
+    """답변 문장마다 그 문장이 인용한 근거([C1] …)에서 글자 2-gram 이 가장 많이 겹치는 문장을 고른다.
+    반환: 태그 -> 근거 본문 안의 [시작, 끝] 목록 (겹치는 구간은 합친다). 답변이 바꿔 쓴 문장은 못 찾을 수 있다."""
+    segs = {tag: [(m.start(), m.end(), _grams(m.group(0))) for m in SEGMENT.finditer(text) if m.group(0).strip()]
+            for tag, text in texts.items()}
+    found: dict[str, list[list[int]]] = {}
+    pairs = []                                         # (답변 문장, 그 문단의 인용 태그): 태그는 보통 문단 끝에만 붙는다
+    for para in re.split(r"\n\s*\n", answer):
+        tags = [t for t in dict.fromkeys(TAG.findall(para)) if t in segs]
+        pairs += [(s, tags) for s in SPLIT_ANSWER.split(para) if s.strip()]
+    for sentence, tags in pairs:
+        a = _grams(TAG.sub("", sentence).replace("**", ""))
+        if not tags or len(a) < 4:
+            continue
+        for tag in tags:
+            scored = sorted(((2 * len(a & g) / (len(a) + len(g)), s, e) for s, e, g in segs[tag] if len(g) >= 4),
+                            reverse=True)
+            for score, s, e in scored[:HL_PER_SENTENCE]:
+                if score >= HL_MIN:
+                    found.setdefault(tag, []).append([s, e])
+    out = {}
+    for tag, ranges in found.items():                  # 겹치거나 이어진 구간 합치기
+        merged = []
+        for s, e in sorted(ranges):
+            if merged and s <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        out[tag] = merged
+    return out
 
 
 def step_info(result: dict) -> dict:
@@ -105,7 +158,22 @@ class WebApp:
             raise ValueError("알 수 없는 회사입니다.")
         return question.strip(), company, bool(body.get("all_companies"))
 
-    def ask_stream(self, question: str, company: str | None, all_companies: bool = False):
+    def check_history(self, body) -> list[dict]:
+        """화면이 보낸 직전 대화 (멀티턴). 서버는 저장하지 않는다. 형식이 틀린 턴은 버리고 최근 것만, 길이도 자른다."""
+        turns = body.get("history") if isinstance(body, dict) else None
+        if not isinstance(turns, list):
+            return []
+        out = []
+        for t in turns[-flow.HISTORY_TURNS:]:
+            if not isinstance(t, dict) or not isinstance(t.get("question"), str) or not t["question"].strip():
+                continue
+            answer, company = t.get("answer"), t.get("company")
+            out.append({"question": t["question"].strip()[:2000],
+                        "answer": answer[:flow.HISTORY_ANSWER_CHARS] if isinstance(answer, str) else "",
+                        "company": company if company in self.allowed else None})
+        return out
+
+    def ask_stream(self, question: str, company: str | None, all_companies: bool = False, history: list | None = None):
         """이벤트를 차례로 내놓는다: status … step(running/done) … result 또는 error. 대기열까지 차면 BlockingIOError."""
         if not self.slots.acquire(blocking=False):
             raise BlockingIOError("지금 질문이 많아 받을 수 없습니다. 잠시 후 다시 보내 주세요.")
@@ -121,7 +189,7 @@ class WebApp:
         def run():
             try:
                 final = None
-                for mode, ev in self.flow_app().stream(flow.start_state(question, company, all_companies),
+                for mode, ev in self.flow_app().stream(flow.start_state(question, company, all_companies, history),
                                                        stream_mode=["tasks", "values"]):
                     if mode == "values":
                         final = ev
@@ -135,6 +203,7 @@ class WebApp:
                 events.put({"type": "result", "answer": final.get("answer", ""), "citations": final.get("citations", []),
                             "evidence": evidence(final, self.sources), "route": final.get("route"), "choices": final.get("choices", []),
                             "suggestions": final.get("suggestions", []),
+                            "question": final.get("question", question), "rewritten": final.get("rewritten", False),
                             "route_prob": final.get("route_prob"), "company_prob": final.get("company_prob"), "sufficient_prob": final.get("sufficient_prob"),
                             "sufficiency_status": final.get("sufficiency_status"), "abstain_reason": final.get("abstain_reason"),
                             "expansions": final.get("expansions", 0), "insufficient": final.get("insufficient", False),
@@ -186,10 +255,11 @@ def make_handler(web: WebApp):
                 return self.send(404, b"not found", "text/plain; charset=utf-8")
             try:
                 n = int(self.headers.get("Content-Length") or 0)
-                if n > 20_000:
+                if n > 60_000:                          # 질문 + 직전 대화 3턴 (답변은 앞 600자)
                     raise ValueError("요청이 너무 깁니다.")
-                question, company, all_companies = web.check(json.loads(self.rfile.read(n) or b"null"))
-                stream = web.ask_stream(question, company, all_companies)
+                body = json.loads(self.rfile.read(n) or b"null")
+                question, company, all_companies = web.check(body)
+                stream = web.ask_stream(question, company, all_companies, web.check_history(body))
                 first = next(stream)                    # 대기열까지 차면 여기서 BlockingIOError
             except (ValueError, json.JSONDecodeError) as e:
                 return self.json(400, {"error": str(e)})

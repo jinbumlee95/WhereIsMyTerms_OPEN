@@ -51,12 +51,18 @@
         <textarea id="question" rows="3" maxlength="2000" placeholder="환불, 개인정보, 계정 제재, 약관 변경 … 무엇이 궁금하세요?" required></textarea>
         <div class="ask-bar">
           <span id="scope" class="scope">전체 회사에서 찾습니다</span>
+          <span id="thread" class="thread" hidden></span>
+          <button id="new-thread" class="new-thread" type="button" hidden title="이전 대화를 잊고 새로 질문합니다">새 대화</button>
           <span class="hint">Ctrl+Enter</span>
           <button id="submit" type="submit">질문하기</button>
         </div>
       </form>
 
       <section id="progress" class="card progress" hidden>
+        <div class="progress-head">
+          <span id="progress-title" class="progress-title">처리 중</span>
+          <span id="timer" class="timer" aria-live="off">0.0초</span>
+        </div>
         <ol id="steps" class="steps"></ol>
         <p id="status" class="status" hidden></p>
       </section>
@@ -64,6 +70,7 @@
       <section id="error" class="card error" hidden></section>
 
       <section id="result" class="card result" hidden>
+        <p id="understood" class="understood" hidden></p>
         <div id="notice" class="notice" hidden></div>
         <div id="answer" class="answer"></div>
         <div id="choices" class="choices" hidden></div>
@@ -77,8 +84,15 @@
       </section>
 
       <section id="evidence-wrap" class="evidence-wrap" hidden>
-        <h2>근거 <span id="evidence-count" class="count"></span></h2>
-        <div id="evidence" class="evidence"></div>
+        <div id="ev-terms-wrap" class="ev-group">
+          <h2><span id="ev-terms-title">근거</span> <span id="ev-terms-count" class="count"></span></h2>
+          <div id="ev-terms" class="evidence"></div>
+        </div>
+        <div id="ev-laws-wrap" class="ev-group" hidden>
+          <h2>법령 근거 <span id="ev-laws-count" class="count"></span></h2>
+          <p class="ev-note">약관이 따른다고 한 법령의 조문입니다 (legalize-kr · 국가법령정보센터). 참고용이며 법률 자문이 아닙니다.</p>
+          <div id="ev-laws" class="evidence"></div>
+        </div>
         <details class="trace">
           <summary>처리 기록 (trace)</summary>
           <pre id="trace"></pre>

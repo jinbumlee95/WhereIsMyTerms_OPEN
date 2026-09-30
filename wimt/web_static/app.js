@@ -4,6 +4,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const pct = (p) => (typeof p === "number" ? p.toFixed(2) : "-");
 const INTENT = { current: "현재 약관", clause_history: "조항 변경 이력", doc_history: "문서 개정 이력" };
 const KIND = { C: "현재 조항", T: "조항 변경 이력", H: "변경 기록", D: "문서 개정일", L: "인용 법령" };
+const CHANGE = { added: "추가", modified: "수정", removed: "삭제" };   // index.CHANGE_KIND 와 같은 표
 const ABSTAIN = {                   // 답변 보류 이유 (flow.abstain_reason)
   not_found: "수록된 약관에서 이 질문과 관련된 내용을 찾지 못했습니다.",
   insufficient: "관련 조항은 찾았지만, 질문 전체에 답할 만큼의 내용을 약관에서 찾지 못했습니다.",
@@ -13,6 +14,9 @@ const ABSTAIN = {                   // 답변 보류 이유 (flow.abstain_reason
 let company = "";            // "" = 전체
 let companies = [];
 const past = [];             // 이번 세션의 질문과 결과
+let thread = [];             // 이어지는 대화 (최근 THREAD_TURNS 턴). 요청마다 보내고, 서버는 저장하지 않는다
+const THREAD_TURNS = 3;
+const THREAD_ANSWER_CHARS = 600;
 
 // ------------------------------------------------------------------ 회사 선택 (검색·즐겨찾기)
 // 즐겨찾기는 이 브라우저의 쿠키(wimt_fav)에만 둔다. 서버는 읽지 않는다.
@@ -87,6 +91,7 @@ function selectCompany(id) {
 
 // ------------------------------------------------------------------ 진행 단계
 const PLAN = [
+  { node: "contextualize", label: "질문 이해", optional: true },
   { node: "classify", label: "분기 판정" },
   { node: "retrieve", label: "검색" },
   { node: "grade", label: "근거 판정" },
@@ -96,17 +101,35 @@ const PLAN = [
   { node: "answer", label: "답변" },
 ];
 let steps = {};
+let stepStart = {};          // 진행 중인 단계 -> 시작 시각 (performance.now)
+let stepTotal = {};          // 단계 -> 걸린 시간 합계 ms (여러 번 도는 단계는 합친다)
 
 function resetSteps() {
   steps = {};
+  stepStart = {};
+  stepTotal = {};
   $("steps").innerHTML = PLAN.map((s) => `<li class="step pending" id="step-${s.node}" ${s.optional ? "hidden" : ""}>
-      <span class="icon"></span><div><div class="label">${s.label}</div><div class="detail">대기</div></div></li>`).join("");
+      <span class="icon"></span><div><div class="label">${s.label}</div>
+      <div class="detail">대기</div><div class="step-time"></div></div></li>`).join("");
+}
+
+// 단계별 걸린 시간: 진행 중이면 흐르는 값, 끝나면 합계. 두 번 이상 돈 단계는 횟수도
+function showStepTime(node) {
+  const el = $(`step-${node}`);
+  if (!el) return;
+  const ms = (stepTotal[node] || 0) + (stepStart[node] ? performance.now() - stepStart[node] : 0);
+  el.querySelector(".step-time").textContent = fmt(ms) + (steps[node] > 1 ? ` · ${steps[node]}회` : "");
+}
+
+function tickSteps() {
+  Object.keys(stepStart).forEach(showStepTime);
 }
 
 function detail(node, info, count) {
   if (!info) return "";
   if (info.error) return node === "classify" ? "판정 실패 → 약관 검색" : "판정 실패";
   switch (node) {
+    case "contextualize": return info.rewritten ? `→ ${info.question}` : "새 질문으로 처리";
     case "classify":
       if (info.route === "clarify") return `회사를 여쭤봄 (${pct(info.company_prob)})`;
       return info.route === "rag" ? `약관 검색 필요 (${pct(info.prob)})` : `즉시 답변 (${pct(info.prob)})`;
@@ -141,12 +164,19 @@ function onStep(ev) {
   el.hidden = false;
   if (ev.status === "running") {
     steps[node] = (steps[node] || 0) + 1;
+    stepStart[node] = performance.now();
+    showStepTime(node);
     el.className = "step running";
     el.querySelector(".detail").textContent = node === "grade" && steps[node] > 1 ? "다시 판정 중…" : "진행 중…";
     if (node === "grade" || node === "expand") {        // 다시 판정·추가 검색 중에는 뒤 단계를 대기로
       $("step-answer").className = "step pending";
     }
   } else {
+    if (stepStart[node]) {
+      stepTotal[node] = (stepTotal[node] || 0) + performance.now() - stepStart[node];
+      delete stepStart[node];
+    }
+    showStepTime(node);
     el.className = `step ${ev.status}`;
     el.querySelector(".icon").textContent = ev.status === "done" ? "✓" : "!";
     el.querySelector(".detail").textContent = detail(ev.node, ev.info, steps[node]);
@@ -161,8 +191,21 @@ function renderAnswer(text) {
   return withCites.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
 }
 
+// 근거 본문에서 답변이 참고한 부분(서버가 준 [시작, 끝] 구간)을 <mark> 로 감싼다. 나머지는 그대로 이스케이프
+function marked(text, ranges) {
+  let out = "", at = 0;
+  for (const [s, e] of ranges) {
+    if (s < at || e > text.length) continue;
+    out += esc(text.slice(at, s)) + `<mark class="hl">${esc(text.slice(s, e))}</mark>`;
+    at = e;
+  }
+  return out + esc(text.slice(at));
+}
+
 function renderResult(r, question) {
   $("result").hidden = false;
+  $("understood").hidden = !r.rewritten;               // 이어진 질문을 어떻게 이해했는지 (틀렸으면 바로 알 수 있게)
+  $("understood").textContent = r.rewritten ? `이렇게 이해했어요: ${r.question}` : "";
   $("answer").innerHTML = renderAnswer(r.answer);
   const cited = new Set(r.citations.map((c) => c.tag));
   $("notice").hidden = !r.insufficient;
@@ -188,23 +231,39 @@ function renderResult(r, question) {
     if (r.expansions) meta.push(`추가 검색 ${r.expansions}회`);
     meta.push(`근거 ${r.evidence.length}건 중 인용 ${cited.size}건`);
   }
+  if (r.elapsed_ms) meta.push(`처리 ${(r.elapsed_ms / 1000).toFixed(1)}초`);
   $("meta").innerHTML = meta.map((m) => `<span>${esc(m)}</span>`).join("");
 
-  $("evidence-wrap").hidden = !r.evidence.length;
-  $("evidence-count").textContent = r.evidence.length ? `${r.evidence.length}건` : "";
-  $("evidence").innerHTML = r.evidence.map((e) => {
-    const sub = [KIND[e.tag[0]], e.version_date, e.change_type].filter(Boolean).join(" · ");
-    return `<details class="ev ${cited.has(e.tag) ? "cited" : ""}" id="ev-${e.tag}">
+  // 근거: 약관(C·T·H·D)과 법령(L)을 나눠 보여 준다. 법령 근거가 없으면 "근거" 한 구역만
+  const card = (e) => {
+    // 조항 변경 이력처럼 날짜가 여러 개면 가장 최근 날짜만 "… 등 n건"으로 (전체는 마우스를 올리면 보인다)
+    const dates = String(e.version_date || "").split(",").map((d) => d.trim()).filter(Boolean);
+    const when = dates.length > 1 ? `${dates[dates.length - 1]} 등 ${dates.length}건` : dates[0] || "";
+    const sub = [KIND[e.tag[0]], when, CHANGE[e.change_type] || e.change_type].filter(Boolean).join(" · ");
+    const law = e.tag[0] === "L";
+    const hl = e.highlights || [];
+    return `<details class="ev ${law ? "law" : ""} ${cited.has(e.tag) ? "cited" : ""}" id="ev-${e.tag}">
       <summary><span class="tag">${esc(e.tag)}</span><span class="head">${esc(e.head.replace(/^\[[CTHDL]\d+\]\s*/, ""))}</span>
-      <span class="sub">${esc(sub)}</span>${e.source_url ? `<a class="source" href="${esc(e.source_url)}" target="_blank"
-      rel="noopener" title="해당 기업의 공식 페이지 (정본)">원문 확인 ↗</a>` : ""}</summary><pre>${esc(e.text)}</pre></details>`;
-  }).join("");
+      ${hl.length ? `<span class="hl-count" title="답변 문장과 가장 비슷한 근거 문장 (글자 비교로 찾은 것)">참고 ${hl.length}곳</span>` : ""}
+      <span class="sub" ${dates.length > 1 ? `title="${esc(dates.join(", "))}"` : ""}>${esc(sub)}</span>${e.source_url ? `<a class="source" href="${esc(e.source_url)}" target="_blank"
+      rel="noopener" title="${law ? "국가법령정보센터 (법령 원문)" : "해당 기업의 공식 페이지 (정본)"}">원문 확인 ↗</a>` : ""}</summary><pre>${marked(e.text, hl)}</pre></details>`;
+  };
+  const terms = r.evidence.filter((e) => e.tag[0] !== "L");
+  const laws = r.evidence.filter((e) => e.tag[0] === "L");
+  $("evidence-wrap").hidden = !r.evidence.length;
+  $("ev-terms-wrap").hidden = !terms.length;
+  $("ev-terms-title").textContent = laws.length ? "약관 근거" : "근거";
+  $("ev-terms-count").textContent = terms.length ? `${terms.length}건` : "";
+  $("ev-terms").innerHTML = terms.map(card).join("");
+  $("ev-laws-wrap").hidden = !laws.length;
+  $("ev-laws-count").textContent = laws.length ? `${laws.length}건` : "";
+  $("ev-laws").innerHTML = laws.map(card).join("");
   $("trace").textContent = JSON.stringify(r.trace, null, 2);
   $("answer").querySelectorAll(".cite").forEach((b) => b.addEventListener("click", () => {
     const ev = $(`ev-${b.dataset.tag}`);
     if (!ev) return;
     ev.open = true;
-    ev.scrollIntoView({ behavior: "smooth", block: "center" });
+    (ev.querySelector("mark.hl") || ev).scrollIntoView({ behavior: "smooth", block: "center" });   // 참고한 부분으로
     ev.classList.add("flash");
     setTimeout(() => ev.classList.remove("flash"), 1200);
   }));
@@ -223,6 +282,32 @@ function addHistory(question, companyId, result) {
   }));
 }
 
+// ------------------------------------------------------------------ 진행 시간 타이머
+let timer = null;
+const fmt = (ms) => `${(ms / 1000).toFixed(1)}초`;
+
+function startTimer() {
+  const t0 = performance.now();
+  $("progress-title").textContent = "처리 중";
+  $("progress").classList.remove("done", "failed");
+  $("timer").textContent = fmt(0);
+  clearInterval(timer);
+  timer = setInterval(() => { $("timer").textContent = fmt(performance.now() - t0); tickSteps(); }, 100);
+  return () => performance.now() - t0;
+}
+
+function stopTimer(ms, ok) {
+  clearInterval(timer);
+  Object.keys(stepStart).forEach((n) => {           // 중단됐으면 진행 중이던 단계도 그 시점에서 멈춘다
+    stepTotal[n] = (stepTotal[n] || 0) + performance.now() - stepStart[n];
+    delete stepStart[n];
+    showStepTime(n);
+  });
+  $("progress-title").textContent = ok ? "완료" : "중단";
+  $("progress").classList.add(ok ? "done" : "failed");
+  $("timer").textContent = fmt(ms);
+}
+
 // ------------------------------------------------------------------ 질문 보내기 (SSE)
 async function ask(question, { allCompanies = false } = {}) {
   $("question").value = question;
@@ -233,10 +318,12 @@ async function ask(question, { allCompanies = false } = {}) {
   $("progress").hidden = false;
   $("status").hidden = true;
   resetSteps();
+  const elapsed = startTimer();
+  let ok = false;
   try {
     const res = await fetch("/api/ask/stream", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, company: company || null, all_companies: allCompanies }),
+      body: JSON.stringify({ question, company: company || null, all_companies: allCompanies, history: thread }),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `요청 실패 (${res.status})`);
     const reader = res.body.getReader();
@@ -255,7 +342,12 @@ async function ask(question, { allCompanies = false } = {}) {
         const ev = JSON.parse(data);
         if (ev.type === "status") { $("status").hidden = false; $("status").textContent = ev.message; }
         else if (ev.type === "step") { $("status").hidden = true; onStep(ev); }
-        else if (ev.type === "result") { renderResult(ev, question); addHistory(question, company, ev); }
+        else if (ev.type === "result") {
+          ev.elapsed_ms = elapsed();                    // 걸린 시간 (이번 세션 목록에서 다시 볼 때도 보이게 결과에 담는다)
+          stopTimer(ev.elapsed_ms, true);
+          ok = true;
+          renderResult(ev, question); addHistory(question, company, ev); addTurn(ev);
+        }
         else if (ev.type === "error") throw new Error(ev.message);
       }
     }
@@ -264,9 +356,30 @@ async function ask(question, { allCompanies = false } = {}) {
     $("error").textContent = e.message;
     document.querySelectorAll(".step.running").forEach((el) => { el.className = "step error"; el.querySelector(".icon").textContent = "!"; });
   } finally {
+    if (!ok) stopTimer(elapsed(), false);
     $("submit").disabled = false;
   }
 }
+
+// ------------------------------------------------------------------ 이어지는 대화 (멀티턴)
+// 서버는 대화를 기억하지 않는다. 화면이 최근 턴을 요청에 담아 보내고, 서버는 새 질문을 독립 질문으로 바꾸는 데만 쓴다.
+function addTurn(r) {
+  if (r.route === "clarify") return;                   // 되묻기는 대화에 넣지 않는다 (회사를 고르면 같은 질문을 다시 보낸다)
+  const answer = String(r.answer || "").replace(/\[[CTHDL]\d+\]/g, "").slice(0, THREAD_ANSWER_CHARS);
+  thread = [...thread, { question: r.question, answer, company: company || null }].slice(-THREAD_TURNS);
+  renderThread();
+}
+
+function renderThread() {
+  $("thread").hidden = $("new-thread").hidden = !thread.length;
+  $("thread").textContent = thread.length ? `대화 이어가는 중 (${thread.length}턴)` : "";
+}
+
+$("new-thread").addEventListener("click", () => {
+  thread = [];
+  renderThread();
+  $("question").focus();
+});
 
 $("ask").addEventListener("submit", (e) => {
   e.preventDefault();

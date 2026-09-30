@@ -1,29 +1,30 @@
 """약관이 인용한 법령 조문: 인용 추출 → legalize-kr 에서 조회 → 캐시.
 
 legalize-kr(https://legalize.kr)는 국가법령정보센터의 법령을 법령마다 Markdown 파일, 개정마다 git 커밋으로 옮긴 저장소다
-(kr/{법령명 띄어쓰기 제거}/법률.md · 시행령.md · 시행규칙.md). 조회는 legalize-cli 의 문서화된 JSON 출력
-(`legalize laws article <법령> <조> --date D --semantic 시행일자 --json`)을 쓴다.
+(kr/{법령명 띄어쓰기 제거}/법률.md · 시행령.md · 시행규칙.md). 커밋 날짜는 공포일자, 파일 머리말에 시행일자가 있다.
 
-- 약관 버전 날짜에 시행 중이던 조문을 가져온다 (변경 기록은 그 버전 날짜, 현재 조항은 오늘 기준).
-- 조회 한 번에 GitHub API 를 10회 넘게 쓴다 (토큰 없으면 시간당 60회). 그래서 결과를 .cache/laws/articles.jsonl 에
-  따로 캐시한다: 지난 날짜의 조문은 바뀌지 않으므로 영구, 현행 조문은 CURRENT_TTL_DAYS 동안. GITHUB_TOKEN 을 두면 5,000회.
+- 약관 버전 날짜에 시행 중이던 판의 조문을 가져온다 (변경 기록은 그 버전 날짜, 현재 조항은 오늘 기준).
+- 법령 파일 단위로 받는다: 커밋 목록(GitHub API 1회) → 기준일에 시행 중인 판 → 그 판 파일(raw, API 한도 안 씀) 한 번.
+  같은 판이면 조문 여러 개·날짜 여러 개가 파일 하나를 함께 쓴다 (2026-09-30 이전: 조문마다 legalize-cli 를 실행해
+  조문 하나에 6~9초, 제목 목록 하나에 7~30초가 걸렸다). GITHUB_TOKEN 을 두면 API 한도가 시간당 5,000회.
 - 법령 원문은 공공저작물이지만 약관 원문과 같이 로컬(.cache/)에만 둔다.
 """
+import hashlib
 import json
 import os
 import re
-import subprocess
-import sys
 import threading
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / ".cache" / "laws"
 CURRENT = "현행"               # as_of 가 없을 때 (현재 조항이 인용한 법령)
-CURRENT_TTL_DAYS = 30
-TIMEOUT = 90                   # legalize-cli 호출 하나 (초)
+REPO = "legalize-kr/legalize-kr"
+COMMITS_TTL_DAYS = 1          # 법령 커밋 목록을 다시 받는 주기 (새 개정 반영)
+TIMEOUT = 30                   # GitHub 요청 하나 (초)
 ARTICLE_CHARS = 3000           # 근거로 넣을 조문 길이
 
 # 약관에 자주 나오는 법령의 legalize-kr 폴더 이름 (띄어쓰기 제거, 가운뎃점은 'ㆍ'). 2026-09 raw 경로로 확인했다.
@@ -131,6 +132,87 @@ def extract(text: str, as_of: str = CURRENT, names: set[str] | None = None,
     return list(dict.fromkeys(out))
 
 
+# ---------------------------------------------------------------------------
+# 조 번호 없이 법령 이름만 인용한 경우 ("'전자상거래 등에서의 소비자보호에 관한 법률'에 따른 사항입니다")
+# 그 법령 안에서만, 인용 문맥(조항 제목 + 앞뒤 문장)의 낱말과 조문 제목이 맞는 조문을 고른다. 다른 법령으로 넓히지 않는다.
+# ---------------------------------------------------------------------------
+NAME_WINDOW = (200, 100)          # 법령 이름 앞뒤로 문맥에 넣을 글자 수
+NAME_ONLY_MAX = 2                 # 이름만 인용한 법령 하나에서 가져올 조문 수
+TITLE_MIN_SCORE = 3               # 맞은 낱말 길이 합이 이보다 작으면 고르지 않는다 ("제공"처럼 흔한 두 글자 하나로는 부족)
+GENERIC_TITLE_TERMS = {"목적", "정의", "적용", "범위", "적용범위", "적용제외", "관계", "벌칙", "과태료", "시행", "보칙", "총칙",
+                       "효과", "특례", "위임", "권한", "다른", "법률", "등", "절차", "기준", "방법", "사항", "경우"}
+
+
+def _name_pattern(name: str) -> re.Pattern:
+    """띄어쓰기를 지운 법령 이름 -> 본문에서 띄어쓰기·가운뎃점 변형을 허용하는 정규식."""
+    chars = [r"[ㆍ·・]" if c == "ㆍ" else re.escape(c) for c in name]
+    return re.compile(r"\s*".join(chars))
+
+
+_NAME_PATTERNS = None
+
+
+def _patterns() -> list[tuple[str, re.Pattern]]:
+    global _NAME_PATTERNS
+    if _NAME_PATTERNS is None:        # 긴 이름부터 (약칭이 긴 이름 속에 들어 있어도 긴 쪽이 먼저)
+        pairs = [(n, n) for n in KNOWN] + list(ALIASES.items())
+        _NAME_PATTERNS = [(law, _name_pattern(alias)) for alias, law in sorted(pairs, key=lambda p: -len(p[0]))]
+    return _NAME_PATTERNS
+
+
+def extract_names(text: str, as_of: str = CURRENT) -> list[tuple[Ref, str]]:
+    """조 번호 없이 이름만 인용한 법령과 그 문맥: [(Ref(article=""), 문맥)]. 법령마다 한 번.
+    뒤에 "제N조"가 붙은 인용은 extract 가 맡으므로 뺀다."""
+    text = text.translate(QUOTES)
+    taken: list[tuple[int, int]] = []
+    found: dict[str, tuple[Ref, str]] = {}
+    for law, pat in _patterns():
+        for m in pat.finditer(text):
+            if any(s <= m.start() < e for s, e in taken):
+                continue
+            taken.append((m.start(), m.end()))
+            after = text[m.end():m.end() + 20]
+            if re.match(r"\s*(시행령|시행규칙)?\s*제\s*\d+\s*조", after):
+                continue
+            category = (re.match(r"\s*(시행령|시행규칙)", after) or [None, "법률"])[1]
+            # 문맥에서 법령 이름 자체는 뺀다 (이름 속 낱말이 조문 제목과 맞아 버리지 않게: "전자상거래등에서의…")
+            window = text[max(0, m.start() - NAME_WINDOW[0]):m.start()] + " " + text[m.end():m.end() + NAME_WINDOW[1]]
+            key = f"{law}/{category}"
+            if key not in found:
+                found[key] = (Ref(law, category, "", as_of), window)
+    return list(found.values())
+
+
+def title_terms(title: str) -> list[str]:
+    """조문 제목 -> 맞춰 볼 낱말 ("청약철회등의 효과" -> ["청약철회"]). 조사·'등'을 떼고 흔한 말은 뺀다."""
+    out = []
+    for w in re.split(r"[\sㆍ·,]+", title):
+        for suffix in ("에서의", "에관한", "에대한", "에따른", "등의"):
+            if w.endswith(suffix) and len(w) > len(suffix):
+                w = w[:-len(suffix)]
+        if w.endswith("의") and len(w) >= 4:
+            w = w[:-1]
+        if w.endswith("등") and len(w) >= 3:
+            w = w[:-1]
+        if len(w) >= 2 and w not in GENERIC_TITLE_TERMS:
+            out.append(w)
+    return out
+
+
+def pick_articles(headings: list[tuple[str, str]], context: str, limit: int = NAME_ONLY_MAX) -> list[str]:
+    """조문 제목 [(제17조, 청약철회등)] 중 문맥에 낱말이 들어 있는 것을 limit 개.
+    순서: 맞은 낱말 길이 합 → 제목 낱말 중 맞은 비율 (제목이 통째로 맞는 조문이 먼저) → 조문 순서."""
+    ctx = re.sub(r"\s+", "", context)
+    scored = []
+    for i, (article, title) in enumerate(headings):
+        terms = title_terms(title)
+        hit = [t for t in terms if t in ctx]
+        score = sum(len(t) for t in hit)
+        if score >= TITLE_MIN_SCORE:
+            scored.append((-score, -len(hit) / len(terms), i, article))
+    return [s[-1] for s in sorted(scored)[:limit]]
+
+
 class LawError(Exception):
     """조회 실패 (한도 초과·네트워크 등). 없는 조문(not found)은 오류가 아니라 None."""
 
@@ -139,65 +221,183 @@ class RateLimited(LawError):
     pass
 
 
-class Client:
-    """legalize-cli 로 조문 하나를 조회한다. 결과(없는 조문 포함)를 캐시해 같은 조회는 API 를 쓰지 않는다."""
+class GitHub:
+    """legalize-kr 저장소 읽기: 파일의 커밋 목록(API)과 특정 커밋의 파일(raw, API 한도를 쓰지 않는다)."""
+    API = "https://api.github.com/repos/" + REPO
+    RAW = "https://raw.githubusercontent.com/" + REPO
 
-    def __init__(self, cache_dir: Path = CACHE, runner=subprocess.run, today=date.today):
-        self.cache_dir, self.runner, self.today = Path(cache_dir), runner, today
-        self.lock = threading.Lock()          # 웹은 여러 스레드가 함께 쓴다: 캐시 dict·파일 추가를 보호 (같은 조문 중복 조회도 막는다)
-        self.path = self.cache_dir / "articles.jsonl"
-        self.cache: dict[str, dict] = {}
-        if self.path.exists():
-            for line in self.path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    row = json.loads(line)
-                    self.cache[row["key"]] = row
+    def __init__(self, token: str | None = None):
+        import httpx
 
-    def cached(self, ref: Ref) -> dict | None:
-        row = self.cache.get(ref.key)
-        if row and ref.as_of == CURRENT and date.fromisoformat(row["fetched"]) < self.today() - timedelta(CURRENT_TTL_DAYS):
+        token = token or os.environ.get("GITHUB_TOKEN")
+        headers = {"Accept": "application/vnd.github+json", **({"Authorization": f"Bearer {token}"} if token else {})}
+        self.http = httpx.Client(timeout=TIMEOUT, headers=headers, follow_redirects=True)
+
+    def commits(self, path: str) -> list[tuple[str, str]]:
+        """[(sha, 커밋 날짜 YYYY-MM-DD)] 최신순. 커밋 날짜는 공포일자다 (legalize-kr 규칙). 없는 파일이면 []."""
+        out, page = [], 1
+        while True:
+            r = self._get(f"{self.API}/commits", params={"path": path, "per_page": 100, "page": page})
+            got = r.json()
+            out += [(c["sha"], c["commit"]["author"]["date"][:10]) for c in got]
+            if len(got) < 100:
+                return out
+            page += 1
+
+    def raw(self, sha: str, path: str) -> str | None:
+        r = self._get(f"{self.RAW}/{sha}/{quote(path)}", allow_404=True)
+        return None if r is None else r.text
+
+    def _get(self, url, params=None, allow_404=False):
+        import httpx
+
+        try:
+            r = self.http.get(url, params=params)
+        except httpx.HTTPError as e:
+            raise LawError(f"{type(e).__name__}: {e}") from e
+        if r.status_code == 404 and allow_404:
             return None
-        return row
+        if r.status_code in (403, 429) and r.headers.get("x-ratelimit-remaining") == "0":
+            raise RateLimited("GitHub API 한도 초과 (GITHUB_TOKEN 을 설정하세요)")
+        if r.status_code >= 400:
+            raise LawError(f"GitHub {r.status_code}: {url}")
+        return r
 
+
+class Client:
+    """조문 조회기. 법령 파일 단위로 받아 캐시하고, 조문·조문 제목은 그 파일에서 꺼낸다.
+
+    - 판 고르기: 법령 파일의 커밋 목록(공포일자 순)에서 기준일 이전에 공포된 판을 최신부터 보며,
+      머리말의 시행일자가 기준일 이전인 첫 판을 쓴다 (공포됐지만 아직 시행 전인 판은 건너뛴다).
+    - 캐시 (.cache/laws/): 커밋 목록은 COMMITS_TTL_DAYS 동안, 판 파일은 커밋 sha 로 영구 (내용이 바뀌지 않는다).
+      같은 법령·같은 판이면 조문이 여러 개여도, 날짜가 달라도 파일은 한 번만 받는다.
+    - 여러 스레드가 함께 쓴다: 법령 파일(경로)마다 잠금을 따로 둬서 서로 다른 법령은 동시에 받는다.
+    """
+
+    def __init__(self, cache_dir: Path = CACHE, source=None, today=date.today):
+        self.cache_dir, self.today = Path(cache_dir), today
+        self.source = source or GitHub()
+        self.files_dir = self.cache_dir / "files"
+        self.commits_path = self.cache_dir / "commits.json"
+        self.lock = threading.Lock()                      # 공유 dict·캐시 파일 쓰기
+        self.path_locks: dict[str, threading.Lock] = {}   # 법령 파일마다 (같은 파일을 두 번 받지 않게)
+        self.parsed: dict[str, dict] = {}                 # sha:path -> {meta, articles, headings}
+        try:
+            self.commit_cache = json.loads(self.commits_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self.commit_cache = {}
+
+    # ---- 공개 ------------------------------------------------------------------
     def article(self, ref: Ref) -> dict | None:
         """조문 (없으면 None). 한도 초과면 RateLimited, 그 밖의 실패는 LawError."""
-        with self.lock:
-            return self._article(ref)
-
-    def _article(self, ref: Ref) -> dict | None:
-        row = self.cached(ref)
-        if row is None:
-            row = {"key": ref.key, "fetched": self.today().isoformat(), **self._fetch(ref)}
-            self.cache[ref.key] = row
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        return row if row.get("found") else None
-
-    def _fetch(self, ref: Ref) -> dict:
-        cmd = [sys.executable, "-m", "legalize_cli", "laws", "article", ref.law, ref.article,
-               "--category", ref.category, "--semantic", "시행일자", "--json",
-               "--cache-dir", str(self.cache_dir / "legalize-cli")]
-        if ref.as_of != CURRENT:
-            cmd += ["--date", ref.as_of]
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-        try:
-            p = self.runner(cmd, capture_output=True, timeout=TIMEOUT, env=env)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            raise LawError(f"{type(e).__name__}: {e}") from e
-        err = (p.stderr or b"").decode("utf-8", "replace").strip()
-        if p.returncode == 4:                      # NotFoundError: 없는 법령·조문, 그 날짜의 개정본 없음
-            return {"found": False, "error": err[:300]}
-        if p.returncode == 7:
-            raise RateLimited(err[:300] or "GitHub API 한도 초과 (GITHUB_TOKEN 을 설정하세요)")
-        if p.returncode != 0:
-            raise LawError(f"legalize-cli 종료 코드 {p.returncode}: {err[:300]}")
-        got = json.loads(p.stdout.decode("utf-8"))
+        doc = self._version(ref)
+        if doc is None:
+            return None
+        body = doc["articles"].get(ref.article)
+        if body is None:
+            return None
+        meta = doc["meta"]
         return {"found": True, "law": ref.law, "category": ref.category, "article": ref.article, "as_of": ref.as_of,
-                "resolved": got.get("resolved_version_date") or "", "effective_date": got.get("시행일자") or "",
-                "promulgated": got.get("공포일자") or "", "source_url": got.get("출처") or "",
-                "status": got.get("status") or "", "heading": " > ".join(got.get("parent_structure") or []),
-                "text": (got.get("content") or "")[:ARTICLE_CHARS]}
+                "resolved": meta.get("시행일자", ""), "effective_date": meta.get("시행일자", ""),
+                "promulgated": meta.get("공포일자", ""), "source_url": meta.get("출처", ""),
+                "status": meta.get("상태", ""), "heading": body["parent"], "text": body["text"][:ARTICLE_CHARS]}
+
+    def headings(self, ref: Ref) -> list[tuple[str, str]]:
+        """그 날짜에 시행 중이던 판의 조문 제목 [(제17조, 청약철회등)]. 법령이 없으면 빈 목록."""
+        doc = self._version(ref)
+        return doc["headings"] if doc else []
+
+    def resolve(self, ref: Ref, context: str) -> list[Ref]:
+        """이름만 인용한 법령 ref(article="") -> 문맥과 조문 제목이 맞는 조문들 (최대 NAME_ONLY_MAX)."""
+        return [Ref(ref.law, ref.category, a, ref.as_of) for a in pick_articles(self.headings(ref), context)]
+
+    # ---- 판 고르기·캐시 -----------------------------------------------------------
+    def _path_lock(self, path: str) -> threading.Lock:
+        with self.lock:
+            return self.path_locks.setdefault(path, threading.Lock())
+
+    def _version(self, ref: Ref) -> dict | None:
+        path = f"kr/{ref.law}/{ref.category}.md"
+        day = self.today().isoformat() if ref.as_of == CURRENT else ref.as_of
+        with self._path_lock(path):
+            for sha, committed in self._commits(path):
+                if committed > day:                       # 기준일 뒤에 공포된 판
+                    continue
+                doc = self._file(sha, path)
+                if doc is None:
+                    continue
+                effective = doc["meta"].get("시행일자") or committed
+                if effective <= day:                      # 공포됐지만 아직 시행 전인 판은 건너뛴다
+                    return doc
+        return None
+
+    def _commits(self, path: str) -> list[tuple[str, str]]:
+        row = self.commit_cache.get(path)
+        if row and date.fromisoformat(row["fetched"]) >= self.today() - timedelta(COMMITS_TTL_DAYS):
+            return [tuple(c) for c in row["commits"]]
+        commits = self.source.commits(path)
+        with self.lock:
+            self.commit_cache[path] = {"fetched": self.today().isoformat(), "commits": commits}
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self.commits_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.commit_cache, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self.commits_path)
+        return commits
+
+    def _file(self, sha: str, path: str) -> dict | None:
+        key = f"{sha}:{path}"
+        if key in self.parsed:
+            return self.parsed[key]
+        cached = self.files_dir / f"{sha}_{hashlib.sha1(path.encode('utf-8')).hexdigest()[:10]}.md"
+        if cached.exists():
+            text = cached.read_text(encoding="utf-8")
+        else:
+            text = self.source.raw(sha, path)
+            if text is None:
+                return None
+            self.files_dir.mkdir(parents=True, exist_ok=True)
+            cached.write_text(text, encoding="utf-8")
+        doc = parse_law(text)
+        with self.lock:
+            self.parsed[key] = doc
+        return doc
+
+
+FRONT = re.compile(r"(?m)^(제목|시행일자|공포일자|상태|출처):\s*(.+?)\s*$")
+ARTICLE_HEAD = re.compile(r"^#+\s*제\s*(\d+)\s*조(?:\s*의\s*(\d+))?\s*(?:\(([^)\n]*)\))?")
+PART_HEAD = re.compile(r"^#+\s*(제\s*\d+\s*(?:편|장|절|관)\b.*)$")
+
+
+def parse_law(text: str) -> dict:
+    """legalize-kr 법령 Markdown -> {meta, articles: {제17조: {text, parent}}, headings: [(제17조, 제목)]}.
+    조문은 "##### 제17조 (제목)" 줄부터 다음 제목 줄(# 로 시작) 전까지다."""
+    meta = dict(FRONT.findall(text[:3000]))
+    articles, headings, part, cur, lines = {}, [], "", None, []
+
+    def close():
+        if cur:
+            articles[cur[0]] = {"text": "\n".join(lines).strip(), "parent": cur[1]}
+
+    body = text.split("\n---", 2)[-1] if text.startswith("---") else text
+    for line in body.splitlines():
+        if line.startswith("#"):
+            m = ARTICLE_HEAD.match(line)
+            if m:
+                close()
+                no = f"제{m.group(1)}조" + (f"의{m.group(2)}" if m.group(2) else "")
+                cur, lines = (no, part), [line.lstrip("#").strip()]
+                headings.append((no, (m.group(3) or "").strip()))
+                continue
+            close()
+            cur, lines = None, []
+            p = PART_HEAD.match(line)
+            if p:
+                part = p.group(1).strip()
+            continue
+        if cur:
+            lines.append(line)
+    close()
+    return {"meta": meta, "articles": articles, "headings": headings}
 
 
 def display(law: str) -> str:

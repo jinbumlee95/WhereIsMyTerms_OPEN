@@ -15,7 +15,7 @@
   rag-eval        채택한 평가 질문으로 검색 방식별 recall@k·MRR (reports/rag_eval.csv)
   answer          질문에 약관 조항·변경 이력을 근거로 답변 (RAG, 질문 분기 + 변경 이력 DB)
   flow            질문 처리 흐름 (LangGraph): Jev 분기 → 검색 → Jev 근거 판정 → (인용 법령 조회) → 부족하면 추가 검색 → 답변
-  laws            최신 조항이 인용한 법령 조문 통계, --fetch 로 legalize-kr 조문 미리 조회 (.cache/laws/)
+  laws            최신 조항이 인용한 법령 통계, --fetch [--history] 로 인용된 법령 파일을 legalize-kr 에서 미리 받음 (.cache/laws/)
   flow-diagram    질문 처리 흐름 도식도 (docs/rag-pipeline.png)
   web             질문 처리 흐름의 웹 화면 (http://127.0.0.1:8767, 단계별 진행을 스트리밍)
   db              변경 이력 DB 생성 (.cache/history.sqlite3, index 가 함께 만든다)
@@ -355,57 +355,68 @@ def cmd_rag_eval(args):
 
 
 def _laws(args):
-    """법령 조회기 (legalize-kr). --no-laws 거나 legalize-cli 가 없으면 None (흐름은 법령 조회를 건너뛴다)."""
-    import importlib.util
+    """법령 조회기 (legalize-kr). --no-laws 면 None (흐름은 법령 조회를 건너뛴다)."""
     import os
     from . import laws as L
     if getattr(args, "no_laws", False):
         return None
-    if importlib.util.find_spec("legalize_cli") is None:
-        print("알림: legalize-cli 가 없어 법령 조회를 건너뜁니다 (pip install legalize-cli)", file=sys.stderr)
-        return None
     if not os.environ.get("GITHUB_TOKEN"):
-        print("알림: GITHUB_TOKEN 이 없어 법령 조회가 GitHub API 시간당 60회로 제한됩니다 (조회 하나에 10회 넘게 씀).",
+        print("알림: GITHUB_TOKEN 이 없어 법령 개정 이력 조회가 GitHub API 시간당 60회로 제한됩니다 (법령 하나에 1회).",
               file=sys.stderr)
     return L.Client()
 
 
 def cmd_laws(args):
-    """최신 조항이 인용한 법령 조문 통계, --fetch 면 현행 조문을 미리 조회해 캐시한다."""
+    """최신 조항이 인용한 법령 통계. --fetch 면 인용된 법령 파일(그 날짜에 시행 중인 판)을 미리 받아 캐시한다.
+    --history 면 변경 기록의 버전 날짜 기준 판도 받는다 (날짜 지정 이력 질문이 빨라진다)."""
+    import time
     from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor
     from . import laws as L
-    refs: dict[str, tuple] = {}
-    counts = Counter()
+    counts, named = Counter(), Counter()
+    wanted: set[tuple[str, str, str]] = set()          # (법령, 구분, 기준일)
     for c in _load("current", args.strategy):
         for r in L.extract(c["text"]):
-            counts[r.key] += 1
-            refs[r.key] = r
-    by_law = Counter()
-    for k, n in counts.items():
-        by_law[f"{L.display(refs[k].law)} ({refs[k].category})"] += n
-    print(f"인용 {sum(counts.values())}건, 서로 다른 조문 {len(counts)}개, 법령 {len(by_law)}개")
-    for name, n in by_law.most_common(args.top):
+            counts[f"{L.display(r.law)} ({r.category})"] += 1
+            wanted.add((r.law, r.category, L.CURRENT))
+        for r, _ in L.extract_names(c["text"]):
+            named[f"{L.display(r.law)} ({r.category})"] += 1
+            wanted.add((r.law, r.category, L.CURRENT))
+    print(f"조 번호 인용 {sum(counts.values())}건 (법령 {len(counts)}개), 이름만 인용 {sum(named.values())}건 (법령 {len(named)}개)")
+    for name, n in (counts + named).most_common(args.top):
         print(f"  {n:4d}  {name}")
     if not args.fetch:
         return
+    if args.history:
+        for r in _load("records", args.strategy):
+            text = "\n".join(u.get("text") or "" for u in r.get("unit_changes") or []) or r.get("text") or ""
+            for ref in L.extract(text, r["version_date"]) + [x for x, _ in L.extract_names(text, r["version_date"])]:
+                wanted.add((ref.law, ref.category, ref.as_of))
     client = _laws(args)
     if client is None:
         sys.exit(2)
-    todo = [refs[k] for k, _ in counts.most_common() if client.cached(refs[k]) is None][:args.limit]
-    print(f"캐시에 없는 조문 {len(todo)}개 조회")
-    found = missing = 0
-    for r in todo:
-        try:
-            a = client.article(r)
-        except L.RateLimited as e:
-            print(f"한도 초과로 멈춤: {e}", file=sys.stderr)
-            break
-        except L.LawError as e:
-            print(f"  실패 {r.key}: {e}", file=sys.stderr)
-            continue
-        found, missing = found + bool(a), missing + (a is None)
-        print(f"  {'찾음' if a else '없음'} {r.key}")
-    print(f"찾음 {found}, 없음 {missing} -> {client.path}")
+    todo = sorted(wanted)
+    print(f"법령 판 {len(todo)}개 확인 (법령 파일 {len({(l, c) for l, c, _ in todo})}개)")
+    t0, found, missing, failed = time.perf_counter(), 0, 0, 0
+
+    def one(item):
+        return client.headings(L.Ref(item[0], item[1], "", item[2]))
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for item, fut in zip(todo, [pool.submit(one, t) for t in todo]):
+            try:
+                ok = bool(fut.result())
+            except L.RateLimited as e:
+                print(f"한도 초과로 멈춤: {e}", file=sys.stderr)
+                break
+            except L.LawError as e:
+                failed += 1
+                print(f"  실패 {item}: {e}", file=sys.stderr)
+                continue
+            found, missing = found + ok, missing + (not ok)
+            if not ok:
+                print(f"  없음 {L.display(item[0])} ({item[1]}) @ {item[2]}")
+    print(f"찾음 {found}, 없음 {missing}, 실패 {failed} ({time.perf_counter() - t0:.1f}초) -> {client.cache_dir}")
 
 
 def cmd_flow(args):
@@ -591,8 +602,8 @@ def main(argv=None):
     wb.add_argument("--no-laws", action="store_true", help="약관이 인용한 법령 조문(legalize-kr)을 조회하지 않음")
     lw = add("laws", cmd_laws, docs=False, strategy=True)
     lw.add_argument("--top", type=int, default=30, help="인용 많은 법령 몇 개를 보일지")
-    lw.add_argument("--fetch", action="store_true", help="현행 조문을 legalize-kr 에서 미리 조회해 캐시 (GitHub API 사용)")
-    lw.add_argument("--limit", type=int, default=20, help="--fetch 로 조회할 최대 조문 수")
+    lw.add_argument("--fetch", action="store_true", help="인용된 법령 파일(현행 판)을 legalize-kr 에서 미리 받아 캐시")
+    lw.add_argument("--history", action="store_true", help="--fetch 때 변경 기록의 버전 날짜 기준 판도 받는다")
     add("db", cmd_db, docs=False, strategy=True)
     tl = add("timeline", cmd_timeline, docs=False)
     tl.add_argument("path", help="문서 경로 (예: coupang/쿠팡이용약관.md)")
