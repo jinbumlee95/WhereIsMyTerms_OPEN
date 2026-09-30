@@ -6,3 +6,16 @@ __pycache__/
 .chroma/
 reports/
 data/
+
+# 공개본에 올리지 않는 내부용 (tools/export_open.py 가 붙인다)
+tests/
+tools/
+docs/*
+!docs/rag-pipeline.png
+!docs/web-screenshot.png
+CLAUDE.md
+AGENTS.md
+README_OPEN.md
+proposal.pdf
+wimt/library.py
+wimt/library_static/
