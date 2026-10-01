@@ -463,7 +463,8 @@ def build(retriever: "rag.Retriever", llm: "rag.LLM", judge, *, mode: str = "hyb
                         available_companies=companies_of(retriever))
         return {"plan": plan, "res": res, "question_meta": meta,
                 "trace": log(state, "retrieve", intent=plan["intent"], queries=res["queries"], where=res["where"],
-                             diverse=bool(res.get("diverse")), found=len(evidence(res)))}
+                             diverse=bool(res.get("diverse")), sla_excluded=bool(res.get("sla_excluded")),
+                             found=len(evidence(res)))}
 
     def grade(state: State) -> dict:
         res, grades = state["res"], {}

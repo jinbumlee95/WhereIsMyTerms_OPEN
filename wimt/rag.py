@@ -49,6 +49,10 @@ CANDIDATES = 50            # 방식마다 가져올 조각 후보 수
 DIVERSE_MIN = 2            # 회사를 가리지 않은 검색: 회사당 최소 상위 2개. 1개면 회사 안에서 엉뚱한 조항이
                            # 1위일 때 그 회사가 통째로 빠진다 ("회원 탈퇴" → 쿠팡 멤버십 전문이 1위, 이용약관 제7조는 2위)
 DIVERSE_K = 5              # k 가 이만큼 늘 때마다 회사당 1개씩 더 (k=15 → 3)
+# "전체 회사" 검색에서 뺄 문서: 서비스 수준 협약(SLA). 네이버 클라우드 플랫폼에만 77개가 있고 틀이 거의 같아서,
+# 전체 순위와 그 회사 몫을 SLA 가 차지한다. 회사를 고른 검색이나 SLA 를 직접 묻는 질문에서는 빼지 않는다.
+SLA_TITLE = re.compile(r"서비스\s*수준\s*협약|\bSLA\b", re.I)
+SLA_WORDS = re.compile(r"SLA|서비스\s*수준|가용\s*(률|성)|가동\s*률", re.I)
 
 
 
@@ -119,12 +123,19 @@ class Corpus:
         return self._col
 
     def _match(self, meta: dict, where: dict) -> bool:
-        return all(meta.get(k) in v if isinstance(v, list) else meta.get(k) == v for k, v in where.items())
+        """where 값: 목록이면 그중 하나, {"$nin": [...]} 이면 그 밖, 아니면 같은 값."""
+        def ok(x, v):
+            if isinstance(v, dict):
+                return x not in v["$nin"]
+            return x in v if isinstance(v, list) else x == v
+        return all(ok(meta.get(k), v) for k, v in where.items())
 
     def _runs(self, queries: list[str], vecs, where: dict, mode: str) -> list[list[str]]:
         runs = []
+        if any(v == [] for v in where.values()):          # 남는 값이 없는 조건 (_and 로 다 빠진 경우)
+            return runs
         if mode in ("vector", "hybrid"):
-            cs = [{k: {"$in": v}} if isinstance(v, list) else {k: v} for k, v in where.items()]
+            cs = [{k: {"$in": v}} if isinstance(v, list) else {k: v} for k, v in where.items()]   # $nin 은 그대로
             w = None if not cs else (cs[0] if len(cs) == 1 else {"$and": cs})
             r = self.col().query(query_embeddings=vecs, n_results=min(CANDIDATES, len(self.entries)), where=w,
                                  include=[])
@@ -143,7 +154,7 @@ class Corpus:
         찾은 순위를 RRF 에 더해 순위만 올린다."""
         runs = self._runs(queries, vecs, where, mode)
         for b in boosts or []:
-            runs += self._runs(queries, vecs, {**where, **b}, mode)
+            runs += self._runs(queries, vecs, _and(where, b), mode)
         return _rrf(runs)
 
     def ranked_within(self, queries: list[str], vecs, ids: list[str], mode: str) -> list[str]:
@@ -196,17 +207,22 @@ class Corpus:
 
 
     def search_diverse(self, queries: list[str], vecs, k: int, mode: str, with_refs: bool = False,
-                       within: list[str] | None = None, boosts: list[dict] | None = None) -> list[dict]:
+                       within: list[str] | None = None, boosts: list[dict] | None = None,
+                       exclude: dict | None = None) -> list[dict]:
         """회사를 가리지 않은 검색 ("전체 회사에서 찾기", "어느 회사가 환불이 쉬워?"): 회사마다 상위 조각을 따로 모은다.
         전체 순위로 k 개를 자르면 표현이 가까운 한 회사가 결과를 다 차지하기 때문이다.
-        회사마다 k//5 개(최소 DIVERSE_MIN), 회사 순서는 전체 순위에서 그 회사가 처음 나온 자리."""
+        회사마다 k//5 개(최소 DIVERSE_MIN), 회사 순서는 전체 순위에서 그 회사가 처음 나온 자리.
+        exclude: 아예 뺄 조각의 조건 (예: {"path": {"$nin": SLA 문서}}, Retriever.excluded)."""
+        exclude = exclude or {}
+        if within is not None and exclude:
+            within = [i for i in within if i in self.by_id and self._match(self.by_id[i]["meta"], exclude)]
         order = (self.ranked_within(queries, vecs, within, mode) if within is not None
-                 else self.ranked(queries, vecs, {}, mode, boosts))
+                 else self.ranked(queries, vecs, exclude, mode, boosts))
         first: dict[str, int] = {}
         for pos, i in enumerate(order):
             if i in self.by_id:
                 first.setdefault(self.by_id[i]["meta"]["company"], pos)
-        pool = within if within is not None else [e["id"] for e in self.entries]
+        pool = within if within is not None else [e["id"] for e in self.entries if self._match(e["meta"], exclude)]
         by_company: dict[str, list[str]] = {}
         for i in pool:
             if i in self.by_id:
@@ -219,7 +235,7 @@ class Corpus:
             if within is not None:
                 got = self.search(queries, vecs, per * 3, {}, mode, with_refs, within=by_company[c])
             else:
-                got = self.search(queries, vecs, per * 3, {"company": c}, mode, with_refs, boosts=boosts)
+                got = self.search(queries, vecs, per * 3, {"company": c, **exclude}, mode, with_refs, boosts=boosts)
             # 플랫폼별 같은 조항(PUBG Steam·PlayStation 제19조)은 문구가 조금 달라도 회사 몫을 하나만 쓴다
             kept: dict[str, dict] = {}
             for v in got:
@@ -248,6 +264,20 @@ def _dup_key(es: list[dict]) -> str:
     return content_hash(body)
 
 
+def _and(where: dict, extra: dict) -> dict:
+    """두 조건을 모두 만족: 같은 키가 목록과 {"$nin": …} 이면 목록에서 뺀 것으로 (순위 올리기가 제외를 덮지 않게)."""
+    out = dict(where)
+    for k, v in extra.items():
+        cur = out.get(k)
+        if isinstance(cur, dict) and isinstance(v, list):
+            out[k] = [x for x in v if x not in cur["$nin"]]
+        elif isinstance(v, dict) and isinstance(cur, list):
+            out[k] = [x for x in cur if x not in v["$nin"]]
+        else:
+            out[k] = v
+    return out
+
+
 def _rrf(runs: list) -> list[str]:
     """Reciprocal Rank Fusion: 여러 순위를 합친다. 순위는 id 목록 또는 (id 목록, 가중치)."""
     runs = [r if isinstance(r, tuple) else (r, 1.0) for r in runs]
@@ -272,6 +302,14 @@ class Retriever:
         # 평가용 계보: 변경·현재 조항이 같은 조항(계보)인지. 이력 질문이 사실상 현재 내용을 물을 때 "조항은 맞혔다"를 본다.
         self.lineage = {I.group_id(c): f"{c['path']}::{c.get('lineage')}" for c in clauses}
         self.lineage.update({e["id"]: f"{e['meta']['path']}::{e['meta']['lineage']}" for e in ces})
+        self.sla_paths = sorted({e["meta"]["path"] for c in (self.clauses, self.changes) for e in c.entries
+                                 if SLA_TITLE.search(e["meta"].get("doc_title") or "")})
+
+    def excluded(self, query: str) -> dict:
+        """전체 회사 검색에서 뺄 조각 조건: SLA 문서. 질문이 SLA·서비스 수준·가용률을 물으면 빼지 않는다."""
+        if not self.sla_paths or SLA_WORDS.search(query):
+            return {}
+        return {"path": {"$nin": self.sla_paths}}
 
     def where(self, query: str, company: str | None = None, doc_type: str | None = None, auto_company: bool = True) -> dict:
         """필터: 명시한 회사·서비스(--service), 없으면 질문 속 서비스 이름 (services.detect)."""
@@ -338,10 +376,11 @@ class Retriever:
         w = self.where(query, company, doc_type, auto_company)
         b = self.boosts(query, plan)
         diverse = not w if diversify is None else diversify
-        clauses = (self.clauses.search_diverse(queries, vecs, k, mode, with_refs, boosts=b) if diverse
+        x = self.excluded(query) if diverse else {}
+        clauses = (self.clauses.search_diverse(queries, vecs, k, mode, with_refs, boosts=b, exclude=x) if diverse
                    else self.clauses.search(queries, vecs, k, w, mode, with_refs, boosts=b))
         res = {"plan": plan, "where": w, "queries": queries, "timelines": [], "changes": [], "doc_versions": [],
-               "clauses": clauses, "diverse": diverse}
+               "clauses": clauses, "diverse": diverse, "sla_excluded": bool(x)}
         if plan["intent"] == "current":
             return res
 
@@ -375,10 +414,10 @@ class Retriever:
         elif dated and self.db:
             cands = [c["id"] for c in self.db.changes_between(w.get("company"), None, d_from, d_to, limit=2000,
                                                               month_day=md)]
-            hits = (self.changes.search_diverse(queries, vecs, k_changes, mode, within=cands) if diverse
+            hits = (self.changes.search_diverse(queries, vecs, k_changes, mode, within=cands, exclude=x) if diverse
                     else self.changes.search(queries, vecs, k_changes + len(seen), w, mode, within=cands))
         elif diverse:
-            hits = self.changes.search_diverse(queries, vecs, k_changes, mode, boosts=b)
+            hits = self.changes.search_diverse(queries, vecs, k_changes, mode, boosts=b, exclude=x)
         else:
             hits = self.changes.search(queries, vecs, k_changes + len(seen), w, mode, boosts=b)
         if self.db and not dated:
