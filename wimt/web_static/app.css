@@ -182,11 +182,11 @@ button { font: inherit; cursor: pointer; }
 .ev { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .ev.cited { border-color: var(--cite); }
 .ev.flash { box-shadow: 0 0 0 3px var(--cite-soft); }
-.ev summary { cursor: pointer; padding: 10px 12px; display: flex; gap: 10px; align-items: baseline; list-style: none; }
+.ev summary { cursor: pointer; padding: 10px 12px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; list-style: none; }
 .ev summary::-webkit-details-marker { display: none; }
 .ev .tag { font-weight: 700; font-size: 12px; padding: 1px 7px; border-radius: 6px; background: var(--cite-soft); color: var(--cite); flex: none; }
 .ev:not(.cited) .tag { background: var(--line); color: var(--muted); }
-.ev .head { font-size: 14px; }
+.ev .head { font-size: 14px; flex: 1 1 300px; min-width: 0; }   /* 칩이 많으면 제목을 줄이지 않고 칩이 다음 줄로 */
 .ev .sub { color: var(--muted); font-size: 12px; margin-left: auto; white-space: nowrap; }
 .ev pre { margin: 0; padding: 12px; border-top: 1px solid var(--line); white-space: pre-wrap; word-break: break-word;
           font: 13px/1.6 inherit; background: var(--bg); max-height: 420px; overflow: auto; }

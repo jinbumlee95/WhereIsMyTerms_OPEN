@@ -4,7 +4,8 @@
   reports/ftc_eval/pairs_all.json 과 보도자료 목록 ../ftc-unfair-terms/cases.csv 에서 읽는다 (둘 다 로컬 전용).
 - 색인: 시정 전 조항을 조항 색인과 같은 임베딩 모델로 같은 Chroma 에 넣는다 (컬렉션 ftc_cases_all__{모델}).
 - 연결(link): 조항 색인에 이미 저장된 조각 벡터와 사례 벡터를 행렬로 비교한다 (추가 임베딩 없음).
-  조항마다 코사인 유사도 LINK_MIN 이상인 사례를 LINK_TOP 개까지 .cache/ftc_links_{전략}__{모델}.json 에 둔다.
+  조항마다 코사인 유사도 LINK_MIN 이상인 사례를, 보도자료마다 가장 비슷한 하나씩 LINK_TOP 건까지
+  .cache/ftc_links_{전략}__{모델}.json 에 둔다 (같은 보도자료의 비슷한 조항이 자리를 다 차지하지 않게).
 - 쓰임: 화면에서 근거 조항 옆에 "문구가 비슷한 공정위 시정 사례"를 참고로 보여 준다. 답변 LLM 에는 넣지 않는다
   (다른 회사 사례를 근거로 이 조항이 불공정하다고 말하게 될 수 있어서). 비슷한 사례가 있다는 것은
   이 조항이 불공정하다는 판단이 아니다.
@@ -109,7 +110,15 @@ def link(db_dir: Path, cache_dir: Path, strategy: str, model: str,
             g = best.setdefault(meta["group"], {})
             for j in idx:
                 g[cids[j]] = max(g.get(cids[j], 0.0), float(row[j]))
-    links = {g: [[c, round(s, 3)] for c, s in sorted(v.items(), key=lambda x: -x[1])[:top]] for g, v in best.items()}
+    links = {}
+    for g, v in best.items():                       # 같은 보도자료의 비슷한 조항은 하나만 (서로 다른 보도자료 top 건)
+        seen, keep = set(), []
+        for c, s in sorted(v.items(), key=lambda x: -x[1]):
+            release = c.split("#")[0]
+            if release not in seen:
+                seen.add(release)
+                keep.append([c, round(s, 3)])
+        links[g] = keep[:top]
     used = {c for v in links.values() for c, _ in v}
     out = {"model": model, "strategy": strategy, "min_sim": min_sim, "top": top, "links": links,
            "cases": {c: cases[c] for c in used if c in cases}}
