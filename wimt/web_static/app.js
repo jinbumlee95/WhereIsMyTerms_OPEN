@@ -15,6 +15,15 @@ const KIND_HELP = {
 };
 const TIP_SOURCE = { L: "법령 원문은 국가법령정보센터에서 확인하세요." };
 const TERMS_SOURCE = "최신이 아닐 수 있으며, 정본은 해당 기업의 공식 페이지입니다.";
+// 유불리 지수와 공정위 유사 사례는 말풍선(마우스 올림)과 펼친 카드 양쪽에 같은 안내를 붙인다 (score.DISCLAIMER 와 같은 뜻)
+const FAVOR_NOTE = "유불리 지수는 AI 판정 모델(typesafe.ai Jev)이 자동으로 매긴 참고용 점수입니다. "
+  + "Jev에 의한 판단이며, 실제 기업의 공정성이나 법적 판단이 아닙니다.";
+const FTC_NOTE = "같은 주제에서 공정거래위원회가 다른 회사 약관을 고치게 한 사례입니다. 문구의 비슷한 정도(AI 임베딩 유사도)로 찾았으며, "
+  + "이 조항이 불공정하거나 위법하다는 판단이 아닙니다. 시정 전·후 문구와 비교해 참고하세요.";
+const favorText = (v) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(2);
+const favorClass = (v) => (v <= -0.7 ? "neg" : v >= 0.5 ? "pos" : "mid");
+const favorLine = (e) => `유불리 지수 ${favorText(e.favor_score)}`
+  + (e.favor_old != null ? ` (변경 전 ${favorText(e.favor_old)})` : "") + " · −2 매우 불리 ~ +2 매우 유리";
 
 // 바로 뜨는 말풍선: data-tip 을 가진 요소에 마우스를 올리거나 키보드로 초점을 주면 위에 띄운다
 const tipBox = document.createElement("div");
@@ -286,12 +295,26 @@ function renderResult(r, question) {
     const sub = [KIND[e.tag[0]], when, CHANGE[e.change_type] || e.change_type].filter(Boolean).join(" · ");
     const law = e.tag[0] === "L";
     const hl = e.highlights || [];
+    const favor = typeof e.favor_score === "number";
+    const ftc = e.ftc || [];
     return `<details class="ev ${law ? "law" : ""} ${cited.has(e.tag) ? "cited" : ""}" id="ev-${e.tag}">
       <summary><span class="tag">${esc(e.tag)}</span><span class="head">${esc(e.head.replace(/^\[[CTHDL]\d+\]\s*/, ""))}</span>
+      ${favor ? `<span class="favor ${favorClass(e.favor_score)}" tabindex="0" data-tip="${esc(favorLine(e) + "\n" + FAVOR_NOTE)}">유불리 ${favorText(e.favor_score)}</span>` : ""}
+      ${ftc.length ? `<span class="ftc-count" tabindex="0" data-tip="${esc(FTC_NOTE)}">공정위 유사 사례 ${ftc.length}</span>` : ""}
       ${hl.length ? `<span class="hl-count" title="답변 문장과 가장 비슷한 근거 문장 (글자 비교로 찾은 것)">참고 ${hl.length}곳</span>` : ""}
       <span class="sub" ${dates.length > 1 ? `title="${esc(dates.join(", "))}"` : ""}>${esc(sub)}</span>${e.source_url ? `<a class="source" href="${esc(e.source_url)}" target="_blank"
-      rel="noopener" title="${law ? "국가법령정보센터 (법령 원문)" : "해당 기업의 공식 페이지 (정본)"}">원문 확인 ↗</a>` : ""}</summary><pre>${marked(e.text, hl)}</pre></details>`;
+      rel="noopener" title="${law ? "국가법령정보센터 (법령 원문)" : "해당 기업의 공식 페이지 (정본)"}">원문 확인 ↗</a>` : ""}</summary>
+      ${favor ? `<p class="favor-note"><strong>${esc(favorLine(e))}</strong><br>${esc(FAVOR_NOTE)}</p>` : ""}
+      <pre>${marked(e.text, hl)}</pre>${ftc.length ? ftcBlock(ftc) : ""}</details>`;
   };
+  const ftcBlock = (cases) => `<div class="ftc"><p class="ftc-head">공정위 유사 시정 사례 ${cases.length}건</p>
+    <p class="ftc-note">${esc(FTC_NOTE)}</p>
+    ${cases.map((c) => `<details class="ftc-case"><summary>${esc(c.date.slice(0, 7))} ${esc(c.target)}
+      <span class="ftc-issue">${esc(c.issue)}</span><span class="sim">유사도 ${c.similarity.toFixed(2)}</span></summary>
+      <div class="ftc-pair"><div><b>시정 전</b><pre>${esc(c.before)}</pre></div>
+      <div><b>시정 후</b><pre>${esc(c.after || "(조항 삭제)")}</pre></div></div>
+      <p class="ftc-meta">${esc([c.action, c.law.replace(/;/g, " ")].filter(Boolean).join(" · "))}
+      <a href="${esc(c.url)}" target="_blank" rel="noopener">공정거래위원회 보도자료 ↗</a></p></details>`).join("")}</div>`;
   const terms = r.evidence.filter((e) => e.tag[0] !== "L");
   const laws = r.evidence.filter((e) => e.tag[0] === "L");
   $("evidence-wrap").hidden = !r.evidence.length;

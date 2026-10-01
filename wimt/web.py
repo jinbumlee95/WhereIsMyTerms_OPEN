@@ -47,10 +47,12 @@ def companies(clauses: list[dict], sources: dict | None = None) -> list[dict]:
     return out
 
 
-def evidence(state: dict, sources: dict | None = None) -> list[dict]:
+def evidence(state: dict, sources: dict | None = None, links=None) -> list[dict]:
     """답변에 쓴 근거 (답변 LLM 에 넘긴 것과 같은 번호 [C1] …) 를 화면에 보여 줄 수 있게.
     정본은 각 기업의 공식 페이지이므로 근거마다 원문 주소(source_url)를 붙인다.
-    highlights: 답변이 이 근거를 인용한 문장과 가장 비슷한 근거 문장의 위치 [[시작, 끝], …] (화면이 표시한다)."""
+    highlights: 답변이 이 근거를 인용한 문장과 가장 비슷한 근거 문장의 위치 [[시작, 끝], …] (화면이 표시한다).
+    favor_score: Jev 유불리 지수 (Jev 가 매긴 것만). ftc: 문구가 비슷한 공정위 시정 사례 (links 가 있으면, 수집본 조항 C 만).
+    둘 다 화면 표시용이고 답변 LLM 에는 넘기지 않는다."""
     if not state.get("res"):
         return []
     sources = sources or {}
@@ -62,6 +64,8 @@ def evidence(state: dict, sources: dict | None = None) -> list[dict]:
     marks = highlights(state.get("answer") or "", {e["tag"]: e["text"] for e in items}) if state.get("citations") else {}
     for e in items:
         e["highlights"] = marks.get(e["tag"], [])
+        if links and e["tag"][0] == "C":
+            e["ftc"] = links.similar(f"{e['path']}::{e['clause_id']}")
     return items
 
 
@@ -125,12 +129,14 @@ QUEUE = WORKERS * 2                                        # 처리 중인 질�
 
 class WebApp:
     def __init__(self, clauses: list[dict], make_app, documents: list[dict] | None = None,
-                 workers: int = WORKERS, queue: int = QUEUE):
+                 workers: int = WORKERS, queue: int = QUEUE, links=None):
         """make_app() -> 컴파일된 흐름. 한 번만 만들어 모든 작업 스레드가 함께 쓴다 (검색기는 읽기 전용,
         SQLite 는 스레드 공유 연결, 로컬 임베딩 모델과 법령 캐시는 각자 잠금으로 보호한다).
         동시에 workers 개를 처리하고 queue 개까지 기다리게 하며, 그보다 많으면 거절한다.
-        documents: 이력 DB 의 문서 목록 (원문 주소 source_url, 최근 개정일 latest_version)."""
+        documents: 이력 DB 의 문서 목록 (원문 주소 source_url, 최근 개정일 latest_version).
+        links: ftc.Links (조항 -> 문구가 비슷한 공정위 시정 사례). 시작할 때 한 번 읽고 바꾸지 않는다."""
         self.sources = {d["path"]: d for d in documents or []}
+        self.links = links
         self.companies = companies(clauses, self.sources)
         self.allowed = {c["id"] for c in self.companies}
         self.make_app, self.app = make_app, None
@@ -204,7 +210,7 @@ class WebApp:
                                     "status": "error" if ev.get("error") else "done",
                                     "info": step_info(ev.get("result") or {})})
                 events.put({"type": "result", "answer": final.get("answer", ""), "citations": final.get("citations", []),
-                            "evidence": evidence(final, self.sources), "route": final.get("route"), "choices": final.get("choices", []),
+                            "evidence": evidence(final, self.sources, self.links), "route": final.get("route"), "choices": final.get("choices", []),
                             "suggestions": final.get("suggestions", []),
                             # 추천 질문마다 가리키는 회사 (하나일 때만). 누르면 화면이 그 회사로 바꿔 묻는다
                             "suggestion_companies": [S.single_company(q) for q in final.get("suggestions", [])],

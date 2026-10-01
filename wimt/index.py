@@ -363,7 +363,13 @@ def change_entries(records: list[dict]) -> list[dict]:
             "effective_date": r.get("effective_date") or "", "commit": r["commit"], "change_type": r["change_type"],
             "lineage": r.get("lineage") or "", "platform": platform(r["path"]), "group": cid, "piece": 1, "pieces": 1, "refs": "",
             "embed_hash": hashlib.sha256(text[:CHANGE_EMBED_CHARS].encode("utf-8")).hexdigest()[:16],
+            "scorer": r.get("scorer") or "",
         }
+        # 화면 표시용 유불리 지수 (바뀐 뒤, 바뀌기 전). Chroma 메타데이터는 None 을 못 담으므로 있을 때만
+        if r.get("favor_score") is not None and r["change_type"] != "removed":
+            meta["favor_score"] = float(r["favor_score"])
+            if r.get("score_delta") is not None:
+                meta["old_score"] = float(r["favor_score"]) - float(r["score_delta"])
         out.append({"id": cid, "text": text, "embed": text[:CHANGE_EMBED_CHARS], "meta": meta})
     return out
 

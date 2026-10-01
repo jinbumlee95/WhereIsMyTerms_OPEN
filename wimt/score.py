@@ -10,6 +10,9 @@
   유불리 판단의 품질을 대표하지 않는다.
 - CachedScorer: (채점기, 문서 종류, 조항 텍스트) 해시로 결과를 저장해 바뀐 조항만 새로 채점한다.
   수탁사·대리점 목록처럼 긴 목록 항은 채점 대상이 아니다 (skip_list, 채점기를 부르지 않는다).
+  채점기가 볼 수 있는 길이(window_chars, Jev 는 SNIPPET_CHARS)보다 긴 항은 창으로 나눠 채점한다 (split_windows):
+  창마다 "n개 중 i번째"와 항의 머리말(첫 줄)을 붙여 앞뒤 관계를 알리고, 항 점수는 가장 불리한 창의 점수,
+  Score.windows 에 창마다 [시작, 끝) 글자 위치와 점수를 남긴다. 창은 각자 캐시된다.
 """
 import json
 import math
@@ -29,6 +32,8 @@ class Score:
     favor_confidence: float     # 가장 높은 단계의 확률
     probs: list[float]          # LEVELS 순서의 확률
     scorer: str
+    # 창으로 나눠 채점한 항만: [{"part": i, "of": n, "start": s, "end": e, "favor_score": x}] (원문 text[s:e])
+    windows: list | None = None
 
 
 def from_probs(probs: list[float], scorer: str) -> Score:
@@ -78,6 +83,8 @@ LEVEL_CRITERIA = {
 
 
 class JevScorer:
+    window_chars = SNIPPET_CHARS   # 이보다 긴 항은 CachedScorer 가 창으로 나눠 보낸다 (build_state 가 앞부분만 보내므로)
+
     def __init__(self, api_key: str | None = None, model: str = JEV_MODEL):
         import httpx  # 필요할 때만
 
@@ -203,13 +210,124 @@ def skipped_score() -> Score:
 
 
 # ---------------------------------------------------------------------------
+# 긴 항: 창으로 나눠 채점 (Jev 는 앞 SNIPPET_CHARS 자만 본다)
+# ---------------------------------------------------------------------------
+LEAD_CHARS = 120             # 뒤 창에 붙이는 머리말(항의 첫 줄) 길이
+CTX_CHARS = 120              # 뒤 창에 붙이는 '바로 앞 목록·문단의 머리 문장' 길이 (끝쪽을 남긴다)
+CTX_LOOKBACK = 3000          # 머리 문장을 찾을 때 창 앞쪽으로 거슬러 볼 글자 수
+_SENT = re.compile(r"(?<=[.!?。])\s+")       # 문장 끝 (".", "다." 뒤 공백)
+_ITEM = re.compile(r"\s*(\d{1,2}[.)]|\(\d{1,2}\)|[①-⑳]|[가-하][.)]|[-·•*]|\|)")   # 번호 항목·표 줄의 시작
+_BREAK = re.compile(r"\n|\s+(?=(?:\d{1,2}[.)]|[①-⑳]|[가-하][.)])\s)")             # 줄바꿈, 또는 줄 안의 번호 항목 앞
+_OPENER = re.compile(r"[:：]\s*$|다음|각\s*호|아래")                                 # 목록을 여는 문장의 표지
+
+
+def _cut(text: str, start: int, end: int, budget: int) -> list[tuple[int, int]]:
+    """text[start:end] 를 budget 이하 구간으로: 줄 경계, 안 되면 문장 경계, 그래도 길면 글자 수로."""
+    spans, s = [], start
+    while end - s > budget:
+        seg = text[s:s + budget]
+        cut = seg.rfind("\n")
+        if cut < budget // 3:                       # 줄이 너무 길면 문장 경계
+            ends = [m.end() for m in _SENT.finditer(seg)]
+            cut = max([e for e in ends if e >= budget // 3], default=budget)
+        spans.append((s, s + cut))
+        s += cut
+    spans.append((s, end))
+    return spans
+
+
+def split_windows(text: str, size: int) -> list[tuple[int, int, tuple[int, int] | None]]:
+    """창 [(시작, 끝, 머리 문장 위치 또는 None)]. 창 본문은 안내·머리말·머리 문장을 붙여도 size 를 넘지 않게 자른다.
+    빈 창은 뺀다. 창들은 원문을 빈틈 없이 이어서 덮는다 (빈 창이 빠진 자리는 공백뿐)."""
+    head = 80 + LEAD_CHARS + CTX_CHARS              # "[… n개 중 i번째 · 머리말: … · 머리 문장: …]" 자리 (안내 글자 약 60자)
+    spans = [(s, e) for s, e in _cut(text, 0, len(text), max(size - head, size // 2)) if text[s:e].strip()]
+    first_end = len(text) - len(text.lstrip()) + len(lead_line(text, full=True))     # 머리말(첫 줄)은 따로 붙는다
+    return [(s, e, context_span(text, s, first_end) if i else None) for i, (s, e) in enumerate(spans)]
+
+
+def _last_sentence(text: str, a: int, b: int) -> tuple[int, int] | None:
+    seg = text[a:b].rstrip()
+    if not seg.strip():
+        return None
+    starts = [a] + [a + m.end() for m in _SENT.finditer(seg) if m.end() < len(seg)]
+    s0, e0 = starts[-1], a + len(seg)
+    s0 += len(text[s0:e0]) - len(text[s0:e0].lstrip())
+    return (max(s0, e0 - CTX_CHARS), e0)            # 길면 끝쪽을 남긴다 (목록을 여는 말은 문장 끝에 온다)
+
+
+def context_span(text: str, start: int, floor: int = 0) -> tuple[int, int] | None:
+    """창이 이어 가는 목록·문단을 여는 문장의 위치 [시작, 끝). floor 앞(항의 첫 줄 = 머리말)은 보지 않는다.
+    1) 창이 표 중간에서 시작하면 그 표의 머리 줄.
+    2) 거꾸로 올라가며 마지막 문장이 목록을 여는 말(':' 로 끝남, '다음·각 호·아래')인 줄. 번호 항목 줄 끝에
+       붙은 여는 문장("2. … 발급한다. 본 SLA 는 아래의 경우에는 적용되지 않는다.")도 찾는다.
+    3) 없으면 번호 항목·표 줄이 아닌 가장 가까운 줄의 마지막 문장."""
+    lo = max(floor, start - CTX_LOOKBACK)
+    if lo >= start:
+        return None
+    nxt = text[start:start + 200].lstrip()
+    if nxt.startswith("|"):                         # 1) 표 중간
+        top, pos = None, text.rfind("\n", 0, start)
+        while pos > lo:
+            prev = text.rfind("\n", 0, pos)
+            line = text[prev + 1:pos]
+            if line.strip().startswith("|"):
+                top = (prev + 1 + len(line) - len(line.lstrip()), prev + 1 + len(line.rstrip()))
+            elif line.strip():
+                break
+            pos = prev
+        if top and top[0] >= lo:
+            return (top[0], min(top[1], top[0] + CTX_CHARS))   # 표 머리는 앞쪽(열 이름)을 남긴다
+    cuts = [lo] + [m.end() for m in _BREAK.finditer(text, lo, start)] + [start]
+    segs = [(a, b) for a, b in zip(cuts, cuts[1:]) if text[a:b].strip()]
+    for a, b in reversed(segs):                     # 2) 목록을 여는 문장
+        sp = _last_sentence(text, a, b)
+        if sp and _OPENER.search(text[sp[0]:sp[1]]):
+            return sp
+    for a, b in reversed(segs):                     # 3) 가장 가까운 일반 줄
+        if not _ITEM.match(text[a:b]) and not text[a:b].strip().startswith("|"):
+            return _last_sentence(text, a, b)
+    return None
+
+
+def lead_line(text: str, full: bool = False) -> str:
+    first = next((s.strip() for s in text.split("\n") if s.strip()), "")
+    return first if full else first[:LEAD_CHARS] + ("…" if len(first) > LEAD_CHARS else "")
+
+
+def window_items(it: "Item", plan: list[tuple[int, int, tuple[int, int] | None]]) -> list["Item"]:
+    """창마다 채점기에 보낼 항. 앞뒤 관계: 제목에 (i/n), 본문 앞에 'n개 중 i번째'와 (둘째 창부터)
+    항의 머리말, 그리고 이 창이 이어 가는 목록·문단의 머리 문장."""
+    n, lead = len(plan), lead_line(it.text)
+    out = []
+    for i, (s, e, ctx) in enumerate(plan, 1):
+        note = f"[긴 항을 나눈 {n}개 중 {i}번째 부분"
+        if i > 1:
+            note += f" · 이 항의 머리말: {lead}"
+        if ctx:
+            note += f" · 이 부분 바로 앞 목록·문단의 머리 문장: {it.text[ctx[0]:ctx[1]].strip()}"
+        out.append(Item(it.service, it.doc_type, f"{it.title} ({i}/{n})", note + "]\n" + it.text[s:e].strip()))
+    return out
+
+
+def combine_windows(scores: list[Score], plan: list[tuple[int, int, tuple[int, int] | None]], name: str) -> Score:
+    """항 점수 = 가장 불리한 창 (조 점수가 가장 불리한 항인 것과 같은 규칙).
+    창별 위치·점수와, 연결 정보로 붙인 머리 문장의 위치(context)를 남긴다. 위치는 모두 항 원문 기준 [시작, 끝)."""
+    worst = min(scores, key=lambda s: s.favor_score)
+    n = len(plan)
+    wins = [{"part": i, "of": n, "start": s, "end": e, "favor_score": sc.favor_score,
+             **({"context": list(ctx)} if ctx else {})}
+            for i, ((s, e, ctx), sc) in enumerate(zip(plan, scores), 1)]
+    return Score(worst.favor_score, worst.favor_confidence, worst.probs, name, wins)
+
+
+# ---------------------------------------------------------------------------
 # 캐시: 최초 수집 시 전체, 이후 바뀐 조항만 채점
 # ---------------------------------------------------------------------------
 class CachedScorer:
     def __init__(self, inner, path: Path):
         self.inner, self.path, self.name = inner, Path(path), inner.name
         self.cache: dict[str, dict] = {}
-        self.hits = self.misses = self.skipped = 0
+        self.hits = self.misses = self.skipped = self.windowed = 0
         if self.path.exists():
             for line in self.path.read_text(encoding="utf-8").splitlines():
                 rec = json.loads(line)
@@ -219,11 +337,37 @@ class CachedScorer:
         return content_hash(f"{self.name}\n{it.doc_type}\n{it.title}\n{it.text}")
 
     def score(self, items: list[Item]) -> list[Score]:
-        skip = [skip_list(it) for it in items]
-        self.skipped += sum(skip)
-        keys = [None if sk else self.key(it) for it, sk in zip(items, skip)]
-        todo = [i for i, k in enumerate(keys) if k is not None and k not in self.cache]
-        self.hits += len(items) - sum(skip) - len(todo)
+        """긴 목록은 건너뛰고(skip_list), 채점기가 볼 수 있는 길이보다 긴 항은 창으로 나눠 창마다 캐시·채점한다."""
+        size = getattr(self.inner, "window_chars", None)
+        plan = []                                   # 항마다: None(건너뜀) | ("one", i) | ("win", [i…], spans)
+        flat: list[Item] = []
+        for it in items:
+            if skip_list(it):
+                self.skipped += 1
+                plan.append(None)
+            elif size and len(it.text) > size and len(spans := split_windows(it.text, size)) > 1:
+                self.windowed += 1
+                plan.append(("win", list(range(len(flat), len(flat) + len(spans))), spans))
+                flat += window_items(it, spans)
+            else:
+                plan.append(("one", len(flat)))
+                flat.append(it)
+        got = self._score_flat(flat)
+        out = []
+        for p in plan:
+            if p is None:
+                out.append(skipped_score())
+            elif p[0] == "one":
+                out.append(got[p[1]])
+            else:
+                out.append(combine_windows([got[i] for i in p[1]], p[2], self.name))
+        return out
+
+    def _score_flat(self, items: list[Item]) -> list[Score]:
+        keys = [self.key(it) for it in items]
+        todo = [i for i, k in enumerate(keys) if k not in self.cache]
+        todo = list({keys[i]: i for i in todo}.values())          # 같은 창이 두 번 나와도 한 번만
+        self.hits += len(items) - len(todo)
         self.misses += len(todo)
         if todo:
             fresh = self.inner.score([items[i] for i in todo])
@@ -232,7 +376,7 @@ class CachedScorer:
                 for i, s in zip(todo, fresh):
                     self.cache[keys[i]] = s.__dict__
                     f.write(json.dumps({"key": keys[i], "score": s.__dict__}, ensure_ascii=False) + "\n")
-        return [skipped_score() if k is None else Score(**self.cache[k]) for k in keys]
+        return [Score(**self.cache[k]) for k in keys]
 
 
 def make_scorer(kind: str, cache_dir: Path):

@@ -126,6 +126,8 @@ def _record(card, version_layer, clause: Clause, change_type, scores, old_scores
         "favor_confidence": score.favor_confidence if score else None,
         "scorer": score.scorer if score else None,
         "score_delta": delta,
+        # 창으로 나눠 채점한 항: 항 id -> [{part, of, start, end, favor_score}] (위치는 그 항 원문 기준)
+        "unit_windows": {u.clause_id: s.windows for u, s in zip(clause.units, scores or []) if s.windows} or None,
         "change_type": change_type,
         "is_unfavorable": bool(score and score.favor_score <= UNFAVORABLE),
         "became_unfavorable": any(u["flag"] == "became" for u in units),
@@ -205,6 +207,9 @@ def scan(path: str, scorer, strategy: str = "article", repo=R.DEFAULT_REPO) -> S
             "clause_id": c.clause_id, "title": c.title, "text": c.text, "lineage": lineage[id(c)],
             "favor_score": worst.favor_score, "favor_confidence": worst.favor_confidence, "scorer": worst.scorer,
             "parts": [{"clause_id": u.clause_id, "text": u.text, "favor_score": s.favor_score,
-                       "favor_confidence": s.favor_confidence} for u, s in zip(c.parts, ss)],
+                       "favor_confidence": s.favor_confidence, **({"windows": s.windows} if s.windows else {})}
+                      for u, s in zip(c.parts, ss)],
+            # 항이 없는 조항(조항 자체가 채점 단위)을 창으로 나눠 채점했으면 여기에 (위치는 text 기준)
+            **({"windows": ss[0].windows} if not c.parts and ss[0].windows else {}),
         })
     return res

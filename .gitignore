@@ -16,6 +16,7 @@ docs/*
 CLAUDE.md
 AGENTS.md
 README_OPEN.md
+EVALUATION_OPEN.md
 proposal.pdf
 wimt/library.py
 wimt/library_static/

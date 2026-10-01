@@ -22,6 +22,7 @@
   timeline        조항 하나의 변경 이력 (DB 조회)
   eval            쿠팡 제38조 면책 조항 재현 시나리오
   index           최신 조항과 변경 이력을 임베딩해 Chroma 벡터 DB 에 색인 (.chroma/, scan 결과 사용)
+  ftc             공정위 시정 사례를 색인하고 조항마다 문구가 비슷한 사례를 연결 (index 끝에도 돈다)
   ask             벡터 DB 의미 검색 (서비스·문서 종류·불리한 조항 필터)
 
 키는 환경 변수나 프로젝트 폴더의 .env 에서 읽는다 (OPENAI_API_KEY, TYPESAFE_API_KEY, 법령 조회용 GITHUB_TOKEN).
@@ -103,7 +104,8 @@ def cmd_scan(args):
         print(f"{p}: 버전 {res.card['change_count'] + 1}, 기록 {len(res.records)}, "
               f"불리해진 조항 {sum(r['became_unfavorable'] for r in res.records)}")
     _write_alerts(alerts, REPORTS / "alerts.md")
-    print(f"채점: 캐시 {scorer.hits}건, 새로 {scorer.misses}건, 긴 목록 제외 {scorer.skipped}건 ({scorer.name}) · 알림 {len(alerts)}건 -> {REPORTS / 'alerts.md'}")
+    print(f"채점: 캐시 {scorer.hits}건, 새로 {scorer.misses}건, 긴 목록 제외 {scorer.skipped}건, "
+          f"창으로 나눈 항 {scorer.windowed}건 ({scorer.name}) · 알림 {len(alerts)}건 -> {REPORTS / 'alerts.md'}")
 
 
 def _write_alerts(alerts: list[dict], path: Path):
@@ -244,7 +246,32 @@ def cmd_index(args):
     ch = I.build_changes(records, CHROMA, args.strategy, emb)
     print(f"{ch['collection']}: 변경 레코드 {ch['total']}개 · 새로 임베딩 {ch['embedded']}, "
           f"메타데이터만 갱신 {ch['metadata_only']}, 삭제 {ch['deleted']} · 임베딩 토큰 {ch['tokens']:,}")
+    _ftc_link(args, emb)
     cmd_db(args)
+
+
+def _ftc_link(args, emb=None):
+    """공정위 시정 사례를 색인하고 조항마다 문구가 비슷한 사례를 연결한다. 사례 파일이 없으면 건너뛴다."""
+    from . import ftc, index as I
+    if not ftc.available():
+        print(f"공정위 시정 사례: {ftc.PAIRS} 또는 {ftc.CASES_CSV} 가 없어 건너뜁니다 (tools/ftc_eval.py extract)")
+        return
+    todo = I.pending(ftc.entries(ftc.load_cases()), CHROMA, ftc.collection(args.model), args.model)
+    if todo:
+        print(f"공정위 시정 사례: 새로 임베딩 {len(todo)}개 · "
+              + I.check_budget(args.model, I.estimate_tokens(todo), getattr(args, "yes", False)))
+    emb = emb or I.make_embedder(args.model)
+    st = ftc.build(CHROMA, emb)
+    ln = ftc.link(CHROMA, CACHE, args.strategy, args.model)
+    print(f"{st['collection']}: 사례 {st['total']}개 (새로 임베딩 {st['embedded']}) · 조항 {ln['clauses']}개 중 "
+          f"{ln['linked']}개에 유사 사례 연결 (유사도 {ftc.LINK_MIN} 이상, 사례 {ln['cases']}개 사용) -> {ln['path']}")
+
+
+def cmd_ftc(args):
+    from . import index as I
+    I.check_model(args.model)
+    _check_embeddings(args, kinds=("clauses",))
+    _ftc_link(args)
 
 
 def cmd_db(args):
@@ -456,7 +483,11 @@ def cmd_web(args):
     from .db import DB
     if not HISTORY_DB.exists():
         cmd_db(args)
-    app = web.WebApp(_load("current", args.strategy), make_app, DB(HISTORY_DB).documents())
+    from . import ftc
+    links = ftc.Links(ftc.links_path(CACHE, args.strategy, args.model))
+    print(f"공정위 유사 시정 사례: 조항 {len(links.links)}개에 연결" if links else
+          "공정위 유사 시정 사례: 연결 파일이 없어 표시하지 않습니다 (python -m wimt ftc)")
+    app = web.WebApp(_load("current", args.strategy), make_app, DB(HISTORY_DB).documents(), links=links)
     app.warm()
     web.serve(app, port=args.port)
 
@@ -605,6 +636,9 @@ def main(argv=None):
     lw.add_argument("--fetch", action="store_true", help="인용된 법령 파일(현행 판)을 legalize-kr 에서 미리 받아 캐시")
     lw.add_argument("--history", action="store_true", help="--fetch 때 변경 기록의 버전 날짜 기준 판도 받는다")
     add("db", cmd_db, docs=False, strategy=True)
+    ft = add("ftc", cmd_ftc, docs=False, strategy=True)    # index 끝에도 돈다. 사례나 기준값만 바꿨을 때 따로
+    ft.add_argument("--model", default=default_model(), help="임베딩 모델 (index 와 같아야 함)")
+    ft.add_argument("--yes", action="store_true", help="예상 토큰이 WIMT_EMBED_MAX_TOKENS 를 넘어도 OpenAI 로 색인")
     tl = add("timeline", cmd_timeline, docs=False)
     tl.add_argument("path", help="문서 경로 (예: coupang/쿠팡이용약관.md)")
     tl.add_argument("clause", help="조항 (예: 제38조)")

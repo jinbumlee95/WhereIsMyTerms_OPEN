@@ -919,6 +919,17 @@ ANSWER_SYSTEM = """너는 한국 온라인 서비스 약관을 설명하는 도�
 """ + NO_OFFER
 
 
+def _favor(score, scorer, old=None) -> dict:
+    """화면에 보일 유불리 지수. Jev 가 매긴 점수만 (기준선 규칙·목록 제외 점수는 보이지 않는다).
+    답변 LLM 에 넘기는 문맥에는 넣지 않는다 (화면 표시용)."""
+    if score is None or not str(scorer or "").startswith("jev"):
+        return {}
+    out = {"favor_score": round(float(score), 2), "favor_scorer": scorer}
+    if old is not None:
+        out["favor_old"] = round(float(old), 2)
+    return out
+
+
 def context_blocks(res: dict) -> tuple[str, list[dict]]:
     blocks, cites = [], []
     for n, v in enumerate(res["clauses"], 1):
@@ -929,7 +940,7 @@ def context_blocks(res: dict) -> tuple[str, list[dict]]:
         body = v["text"] + "".join(f"\n\n(참조 {r['clause_id']} {r['title']})\n{r['text'][:1500]}" for r in v.get("related", []))
         blocks.append(head + "\n" + body)
         cites.append({"tag": tag, "path": v["path"], "clause_id": v["clause_id"], "version_date": v["version_date"],
-                      "doc": S.doc_label(v)})
+                      "doc": S.doc_label(v), **_favor(v.get("clause_score"), v.get("scorer"))})
     for n, t in enumerate(res.get("timelines", []), 1):
         tag = f"T{n}"
         note = f"전체 {t['total']}건"
@@ -953,7 +964,8 @@ def context_blocks(res: dict) -> tuple[str, list[dict]]:
         tag = f"H{n}"
         blocks.append(f"[{tag}] " + v["text"])
         cites.append({"tag": tag, "path": v["path"], "clause_id": v["clause_id"], "version_date": v["version_date"],
-                      "change_type": v["change_type"], "doc": _doc_name(v["path"], v.get("doc_title"))})
+                      "change_type": v["change_type"], "doc": _doc_name(v["path"], v.get("doc_title")),
+                      **_favor(v.get("favor_score"), v.get("scorer"), v.get("old_score"))})
     for n, d in enumerate(res.get("doc_versions", []), 1):
         tag = f"D{n}"
         vs = d["versions"]
