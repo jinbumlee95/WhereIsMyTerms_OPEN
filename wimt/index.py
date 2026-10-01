@@ -17,6 +17,7 @@ import threading
 from pathlib import Path
 
 from .pipeline import UNFAVORABLE
+from .score import is_list  # noqa: F401  (조각 판정과 채점 제외가 같은 기준을 쓴다)
 from .services import doc_label, platform
 
 EMBED_MODEL = "dragonkue/snowflake-arctic-embed-l-v2.0-ko"   # 기본 (로컬, requirements-local.txt)
@@ -82,6 +83,20 @@ def check_model(model: str):
         raise ModelError(f"로컬 임베딩 모델 {model} ({model_source(model)}) 을 쓰려면 requirements-local.txt 가 필요합니다 "
                          f"(torch 2.5.1 이라 Python 3.12 이하). 이 PC 에서 OpenAI 를 쓰려면 .env 에 "
                          f"{MODEL_ENV}=text-embedding-3-small 처럼 적으세요.")
+    elif not has_directml():
+        raise ModelError(f"로컬 임베딩 모델 {model} ({model_source(model)}) 은 GPU(DirectML)로만 돌립니다. "
+                         f"onnxruntime-directml 이 없거나 GPU 를 못 찾았습니다 (CPU 판 onnxruntime 이 덮어썼다면 "
+                         f"지우고 onnxruntime-directml 을 다시 설치). 이 PC 에서 OpenAI 를 쓰려면 .env 에 "
+                         f"{MODEL_ENV}=text-embedding-3-small 처럼 적으세요.")
+
+
+def has_directml() -> bool:
+    """ONNX Runtime 에 DirectML(GPU) 실행 장치가 있는가. 로컬 임베딩은 CPU 로 돌리지 않는다."""
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return False
+    return "DmlExecutionProvider" in ort.get_available_providers()
 
 
 def check_index(db_dir: Path, kind: str, strategy: str, model: str, ids) -> None:
@@ -122,37 +137,29 @@ def _allow_onnxruntime_directml(version: str):
 class LocalEmbedder:
     """로컬 임베딩 (예: dragonkue/snowflake-arctic-embed-l-v2.0-ko).
 
-    GPU: Windows 에서는 ONNX Runtime + DirectML 로 AMD·Intel·NVIDIA GPU 를 쓴다 (onnxruntime-directml 이 있을 때).
-    없으면 PyTorch CPU. 질문은 모델이 정한 query 프롬프트를 붙여 인코딩한다 (arctic-embed 는 "query: ").
+    GPU 전용: Windows 에서 ONNX Runtime + DirectML 로 AMD·Intel·NVIDIA GPU 를 쓴다 (onnxruntime-directml).
+    DirectML 이 없으면 CPU 로 넘어가지 않고 ModelError (CPU 는 색인 한 번에 약 55분). 질문은 모델이 정한 query 프롬프트를 붙여 인코딩한다 (arctic-embed 는 "query: ").
     """
     MAX_TOKENS = 1024        # 조각은 1,500자 이하라 충분하고, 긴 입력의 메모리·시간을 막는다
     BATCH = 16
 
     CACHE = Path(__file__).resolve().parents[1] / ".cache" / "models"     # ONNX 로 바꾼 모델 (처음 한 번만 변환)
 
-    def __init__(self, model: str, device: str | None = None):
+    def __init__(self, model: str):
+        check_model(model)                   # DirectML 이 없으면 여기서 멈춘다
+        import onnxruntime as ort
         from sentence_transformers import SentenceTransformer
 
-        self.model, self.tokens, self.device = model, 0, "cpu"
+        self.model, self.tokens, self.device = model, 0, "directml"
         self.lock = threading.Lock()
-        providers = []
-        try:
-            import onnxruntime as ort
-            providers = ort.get_available_providers()
-        except ImportError:
-            pass
-        if device != "cpu" and "DmlExecutionProvider" in providers:
-            _allow_onnxruntime_directml(ort.__version__)
-            local = self.CACHE / re.sub(r"[^A-Za-z0-9]+", "-", model).strip("-")
-            kw = {"backend": "onnx", "model_kwargs": {"provider": "DmlExecutionProvider"}}
-            if (local / "onnx" / "model.onnx").exists():
-                self.st = SentenceTransformer(str(local), **kw)
-            else:
-                self.st = SentenceTransformer(model, **kw)
-                self.st.save_pretrained(str(local))
-            self.device = "directml"
+        _allow_onnxruntime_directml(ort.__version__)
+        local = self.CACHE / re.sub(r"[^A-Za-z0-9]+", "-", model).strip("-")
+        kw = {"backend": "onnx", "model_kwargs": {"provider": "DmlExecutionProvider"}}
+        if (local / "onnx" / "model.onnx").exists():
+            self.st = SentenceTransformer(str(local), **kw)
         else:
-            self.st = SentenceTransformer(model, device="cpu")
+            self.st = SentenceTransformer(model, **kw)
+            self.st.save_pretrained(str(local))
         self.st.max_seq_length = min(self.st.max_seq_length or self.MAX_TOKENS, self.MAX_TOKENS)
         self.query_prompt = "query" if "query" in (self.st.prompts or {}) else None
 
@@ -166,10 +173,6 @@ class LocalEmbedder:
         texts = [prompt + t for t in texts]
         lens = [len(self.st.tokenizer(t, truncation=True, max_length=self.st.max_seq_length)["input_ids"]) for t in texts]
         self.tokens += sum(lens)
-        if self.device != "directml":
-            vecs = self.st.encode(texts, batch_size=self.BATCH, normalize_embeddings=True,
-                                  show_progress_bar=len(texts) > 200)
-            return [v.tolist() for v in vecs]
         # DirectML 은 입력 모양이 바뀔 때마다 그래프를 다시 준비해서(수십 초) 느리다.
         # 길이를 몇 개 구간으로, 배치 크기를 고정해 모양 수를 줄인다 (구간마다 한 번만 준비).
         import torch
@@ -266,15 +269,6 @@ def refs(text: str, self_article: str, known: set[str]) -> list[str]:
 
 def group_id(c: dict) -> str:
     return f"{c['path']}::{c['clause_id']}"
-
-
-def is_list(text: str) -> bool:
-    """이름 나열·표 조각: 줄 대부분이 표 줄이거나, 짧은 줄(평균 25자 이하)이 15줄 이상. 의미 검색으로 얻을 게 적다."""
-    lines = [s.strip() for s in text.split("\n") if s.strip()]
-    if not lines:
-        return False
-    table = sum(s.startswith("|") for s in lines) / len(lines) >= 0.8
-    return table or (len(lines) >= 15 and sum(map(len, lines)) / len(lines) <= 25)
 
 
 def entries(clauses: list[dict], limit: int = PIECE_CHARS) -> list[dict]:

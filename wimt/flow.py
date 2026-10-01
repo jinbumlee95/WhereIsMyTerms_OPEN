@@ -602,6 +602,8 @@ def build(retriever: "rag.Retriever", llm: "rag.LLM", judge, *, mode: str = "hyb
         # 이어서 물을 만한 독립 질문 (화면은 버튼으로, 누르면 새 질문으로 처리한다. 대화 이력은 쓰지 않는다)
         heads = "\n".join("- " + b.split("\n", 1)[0] for b in ctx.split("\n\n---\n\n") if b)
         more = follow_ups(state["question"], text, heads)
+        # 수집본이 최신이 아닐 수 있다는 안내는 LLM 이 빠뜨리지 않게 코드가 붙인다
+        text = rag.with_version_note(text, cites, used, getattr(retriever, "db", None))
         return {"answer": text, "citations": [c for c in cites if c["tag"] in used], "insufficient": False,
                 "suggestions": more,
                 "trace": log(state, "answer", evidence=len(cites), cited=len(used), insufficient=False,

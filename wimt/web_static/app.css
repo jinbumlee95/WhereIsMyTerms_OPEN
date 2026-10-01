@@ -23,15 +23,42 @@ button { font: inherit; cursor: pointer; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
 .topbar { background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px 24px; }
-.brand { display: flex; gap: 12px; align-items: center; max-width: 1280px; margin: 0 auto; }
+.brand { display: flex; gap: 12px; align-items: center; max-width: 1560px; margin: 0 auto; }
 .logo { width: 36px; height: 36px; border-radius: 8px; background: var(--accent); color: #fff;
         display: grid; place-items: center; font-weight: 700; font-size: 20px; }
 .brand h1 { margin: 0; font-size: 17px; }
 .brand p { margin: 0; color: var(--muted); font-size: 13px; }
 
-.layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 24px; max-width: 1280px;
-          margin: 0 auto; padding: 24px; }
-@media (max-width: 860px) { .layout { grid-template-columns: 1fr; padding: 16px; } }
+.layout { display: grid; grid-template-columns: 280px minmax(0, 1fr) 260px; grid-template-areas: "side main convs";
+          gap: 24px; max-width: 1560px; margin: 0 auto; padding: 24px; }
+.sidebar { grid-area: side; }
+.main { grid-area: main; }
+.convs-panel { grid-area: convs; }
+@media (max-width: 1180px) {
+  .layout { grid-template-columns: 280px minmax(0, 1fr); grid-template-areas: "side main" "convs main"; grid-template-rows: auto 1fr; }
+}
+@media (max-width: 860px) { .layout { grid-template-columns: 1fr; grid-template-areas: "side" "convs" "main"; padding: 16px; } }
+
+/* 오른쪽: 회사별 대화 목록 (최근 것이 위) */
+.convs-panel h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 4px; }
+.convs-note { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+.convs { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px;
+         max-height: 75vh; overflow-y: auto; }
+.convs .empty { font-size: 13px; color: var(--muted); }
+.conv { position: relative; }
+.conv-open { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; padding: 8px 28px 8px 12px;
+             border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); }
+.conv-open:hover { border-color: var(--accent); }
+.conv.active .conv-open { border-color: var(--accent); background: var(--accent-soft); }
+.conv-company { align-self: flex-start; font-size: 11px; font-weight: 600; padding: 0 7px; border-radius: 999px;
+                background: var(--accent-soft); color: var(--accent); }
+.conv.active .conv-company { background: var(--accent); color: #fff; }
+.conv-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-last { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-meta { font-size: 11px; color: var(--muted); }
+.conv-del { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border: none; border-radius: 6px;
+            background: none; color: var(--muted); font-size: 15px; line-height: 1; }
+.conv-del:hover { background: var(--err-soft); color: var(--err); }
 
 .sidebar section { margin-bottom: 24px; }
 .sidebar h2, .evidence-wrap h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 8px;
@@ -39,7 +66,10 @@ button { font: inherit; cursor: pointer; }
 .company-search { width: 100%; margin-bottom: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
                   background: var(--panel); color: var(--text); font: inherit; font-size: 14px; }
 .company-search:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
-.companies { display: flex; flex-direction: column; gap: 4px; max-height: 55vh; overflow-y: auto; padding-right: 2px; }
+/* 회사 목록: 한 번에 6줄 정도(줄 42px + 간격 4px)만 보이고 나머지는 스크롤 */
+.companies { display: flex; flex-direction: column; gap: 4px; max-height: calc(6 * 42px + 5 * 4px); overflow-y: auto;
+             padding-right: 2px; overscroll-behavior: contain; border-bottom: 1px solid var(--line); position: relative; }
+.company-row { flex: none; }
 .companies .group { margin: 8px 4px 2px; font-size: 12px; color: var(--muted); }
 .companies .empty { margin: 8px 4px; font-size: 13px; color: var(--muted); }
 .company-row { display: flex; align-items: center; gap: 2px; }
@@ -57,11 +87,6 @@ button { font: inherit; cursor: pointer; }
 .examples button { text-align: left; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
                    background: var(--panel); color: var(--text); font-size: 13px; }
 .examples button:hover { border-color: var(--accent); }
-.history { margin: 0; padding: 0; list-style: none; font-size: 13px; }
-.history li { margin-bottom: 2px; }
-.history li.empty { color: var(--muted); }
-.history button { display: block; width: 100%; background: none; border: none; padding: 4px 0; color: var(--accent);
-                  text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .status { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
 .progress-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
 .progress-title { font-size: 13px; font-weight: 600; color: var(--accent); }
@@ -157,7 +182,7 @@ button { font: inherit; cursor: pointer; }
 a { color: var(--accent); }
 .muted { color: var(--muted); }
 .disclaimer { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
-.site-footer { max-width: 1280px; margin: 8px auto 24px; padding: 0 24px; font-size: 12px; color: var(--muted); }
+.site-footer { max-width: 1560px; margin: 8px auto 24px; padding: 0 24px; font-size: 12px; color: var(--muted); }
 .site-footer p { border-top: 1px solid var(--line); padding-top: 12px; margin: 0; }
 .ev .source { font-size: 12px; white-space: nowrap; }
 .doc { max-width: 860px; margin: 0 auto; padding: 24px; }
@@ -173,3 +198,10 @@ a { color: var(--accent); }
 .doclist { margin: 0; padding: 8px 12px 12px 32px; border-top: 1px solid var(--line); font-size: 14px; }
 .doclist li { margin-bottom: 4px; }
 .doclist .muted { font-size: 12px; margin-left: 6px; }
+
+/* 근거 번호 말풍선 (app.js showTip): 마우스를 올리면 바로 뜬다 */
+.tip { position: absolute; z-index: 1000; max-width: min(360px, calc(100vw - 16px)); padding: 8px 10px;
+       border-radius: 8px; background: var(--text); color: var(--panel); font-size: 12.5px; line-height: 1.5;
+       white-space: pre-line; pointer-events: none; box-shadow: 0 4px 12px rgba(16, 24, 40, .18); }
+[data-tip] { cursor: help; }
+.cite[data-tip] { cursor: pointer; }

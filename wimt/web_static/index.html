@@ -39,10 +39,6 @@
           <button type="button" data-q="안녕? 뭘 물어볼 수 있어?" data-c="">인사·사용법 (즉시 답변)</button>
         </div>
       </section>
-      <section>
-        <h2>이번 세션의 질문</h2>
-        <ul id="history" class="history"><li class="empty">아직 없습니다</li></ul>
-      </section>
     </aside>
 
     <main class="main">
@@ -99,6 +95,12 @@
         </details>
       </section>
     </main>
+
+    <aside class="convs-panel" aria-labelledby="convs-title">
+      <h2 id="convs-title">최근 대화</h2>
+      <p class="convs-note">이 브라우저에만 저장됩니다. 눌러서 이어 가세요.</p>
+      <ul id="convs" class="convs"></ul>
+    </aside>
   </div>
   <footer class="site-footer">
     <p>이 서비스는 <a href="https://github.com/jinbumlee95/TOS-Korea-Project/tree/main#%EA%B6%8C%EB%A6%AC-%EA%B3%A0%EC%A7%80-%EB%B0%8F-%EC%9D%B4%EC%9A%A9-%EC%A1%B0%EA%B1%B4" target="_blank" rel="noopener">TOS-Korea-Project 「권리 고지 및 이용 조건」</a>을 따릅니다.

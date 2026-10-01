@@ -103,7 +103,7 @@ def cmd_scan(args):
         print(f"{p}: 버전 {res.card['change_count'] + 1}, 기록 {len(res.records)}, "
               f"불리해진 조항 {sum(r['became_unfavorable'] for r in res.records)}")
     _write_alerts(alerts, REPORTS / "alerts.md")
-    print(f"채점: 캐시 {scorer.hits}건, 새로 {scorer.misses}건 ({scorer.name}) · 알림 {len(alerts)}건 -> {REPORTS / 'alerts.md'}")
+    print(f"채점: 캐시 {scorer.hits}건, 새로 {scorer.misses}건, 긴 목록 제외 {scorer.skipped}건 ({scorer.name}) · 알림 {len(alerts)}건 -> {REPORTS / 'alerts.md'}")
 
 
 def _write_alerts(alerts: list[dict], path: Path):

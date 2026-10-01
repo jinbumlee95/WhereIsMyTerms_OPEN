@@ -29,11 +29,14 @@ STEP_NAMES = {"contextualize": "질문 이해", "classify": "분기 판정", "di
 
 
 def companies(clauses: list[dict], sources: dict | None = None) -> list[dict]:
-    """회사별 문서 목록 (최신 조항에서). sources(경로 -> 이력 DB 문서)가 있으면 원문 주소·최근 개정일도 붙인다."""
+    """회사별 문서 목록. sources(경로 -> 이력 DB 문서)가 있으면 이력 DB 의 문서를 기준으로 삼고 원문 주소·최근 개정일도 붙인다.
+    이력 DB 는 scan 결과로 다시 만들므로 색인과 같은 문서를 가리킨다. 없으면(테스트 등) 최신 조항에서 뽑는다."""
     sources = sources or {}
+    titles = {c["path"]: c.get("doc_title") for c in clauses}
     docs: dict[str, dict[str, str]] = {}
-    for c in clauses:
-        docs.setdefault(c["path"].split("/")[0], {})[c["path"]] = c.get("doc_title") or Path(c["path"]).stem
+    for p in sources or titles:
+        docs.setdefault(p.split("/")[0], {})[p] = ((sources.get(p) or {}).get("title") or titles.get(p)
+                                                  or Path(p).stem)
     out = []
     for k, v in sorted(docs.items()):
         items = [{"path": p, "title": t, "source_url": (sources.get(p) or {}).get("source_url") or "",
@@ -203,6 +206,8 @@ class WebApp:
                 events.put({"type": "result", "answer": final.get("answer", ""), "citations": final.get("citations", []),
                             "evidence": evidence(final, self.sources), "route": final.get("route"), "choices": final.get("choices", []),
                             "suggestions": final.get("suggestions", []),
+                            # 추천 질문마다 가리키는 회사 (하나일 때만). 누르면 화면이 그 회사로 바꿔 묻는다
+                            "suggestion_companies": [S.single_company(q) for q in final.get("suggestions", [])],
                             "question": final.get("question", question), "rewritten": final.get("rewritten", False),
                             "route_prob": final.get("route_prob"), "company_prob": final.get("company_prob"), "sufficient_prob": final.get("sufficient_prob"),
                             "sufficiency_status": final.get("sufficiency_status"), "abstain_reason": final.get("abstain_reason"),

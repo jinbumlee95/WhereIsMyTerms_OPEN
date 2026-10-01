@@ -863,13 +863,16 @@ NO_OFFER = """- "원하시면 …해 드릴게요", "더 궁금한 점 있으세
 ANSWER_SYSTEM = """너는 한국 온라인 서비스 약관을 설명하는 도우미다. 아래 [근거]에 있는 약관 조항과 변경 이력만 사용해 답한다.
 - 근거에 없는 내용은 추측하지 말고 "제공된 약관에서 찾지 못했다"고 말한다.
 - 문장마다 근거 번호를 [C1], [T1], [H2], [D1], [L1] 처럼 붙인다.
-  C 는 현재 약관 조항, T 는 조항 하나의 변경 이력(날짜순), H 는 검색으로 찾은 개별 변경, D 는 문서 전체의 개정일 목록,
+  C 는 이 서비스가 마지막으로 수집한 약관 조항, T 는 조항 하나의 변경 이력(날짜순), H 는 검색으로 찾은 개별 변경, D 는 문서 전체의 개정일 목록,
   L 은 약관 조항이 "…법에 따른다"며 인용한 법령 조문(legalize-kr, 적힌 기준일에 시행 중이던 판)이다.
 - 법령 조문(L)은 약관이 따르겠다고 한 내용을 풀어 줄 때 쓰고, 어느 약관 조항이 인용했는지 함께 밝힌다.
   근거에 "약관이 이 조문을 지정한 것이 아니다"라고 적힌 조문은 "인용되어 있다", "약관이 제N조를 든다"라고 쓰지 않는다.
   "약관은 ○○법을 따른다고만 하고 조문은 밝히지 않았으며, 관련 조문으로는 ○○법 제N조(제목)가 있다"처럼 구분해서 쓴다.
   약관과 법령이 다르게 읽히면 둘 다 그대로 전하고 어느 쪽이 우선하는지는 판단하지 않는다. 법률 자문처럼 말하지 않는다.
 - 질문한 기간에 변경이 없다고 적혀 있으면 그대로 말하고, 가장 가까운 변경을 알려 준다.
+- 근거의 버전 날짜는 이 서비스가 마지막으로 수집한 버전이고, 회사가 지금 게시한 약관과 다를 수 있다.
+  "현재 버전은 …이다", "현행 약관은 …이다"처럼 단정하지 말고 "제가 알고 있는 버전(…)에서는"처럼 쓴다.
+  버전 안내 문구("최신이 아닐 수 있다")는 답변 끝에 따로 붙으므로 직접 쓰지 않는다.
 - 날짜는 근거에 적힌 그대로 쓴다. 변경 이력을 말할 때는 개정일(과 시행일)을 밝힌다.
 - 여러 서비스가 섞여 있으면 서비스별로 나눠 답한다.
 - 조항을 말할 때는 문서 이름을 함께 쓴다 (예: "쿠팡 이용약관 제7조"). 조 번호가 같아도 다른 문서의 조항은 섞지 않는다.
@@ -881,12 +884,13 @@ def context_blocks(res: dict) -> tuple[str, list[dict]]:
     blocks, cites = [], []
     for n, v in enumerate(res["clauses"], 1):
         tag = f"C{n}"
-        head = f"[{tag}] {S.doc_label(v)} {v['clause_id']} {v['title']} (현재 버전 {v['version_date']})"
+        head = f"[{tag}] {S.doc_label(v)} {v['clause_id']} {v['title']} (수집본 {v['version_date']} 버전)"
         if v.get("also_in"):
             head += " · 같은 내용: " + ", ".join(S.platform(a["path"]) or a["path"] for a in v["also_in"])
         body = v["text"] + "".join(f"\n\n(참조 {r['clause_id']} {r['title']})\n{r['text'][:1500]}" for r in v.get("related", []))
         blocks.append(head + "\n" + body)
-        cites.append({"tag": tag, "path": v["path"], "clause_id": v["clause_id"], "version_date": v["version_date"]})
+        cites.append({"tag": tag, "path": v["path"], "clause_id": v["clause_id"], "version_date": v["version_date"],
+                      "doc": S.doc_label(v)})
     for n, t in enumerate(res.get("timelines", []), 1):
         tag = f"T{n}"
         note = f"전체 {t['total']}건"
@@ -904,22 +908,24 @@ def context_blocks(res: dict) -> tuple[str, list[dict]]:
             lines.insert(1, f"(오래된 변경 {len(t['changes']) - TIMELINE_MAX}건 생략)")
         blocks.append("\n".join(lines))
         cites.append({"tag": tag, "path": t["path"], "clause_id": t["clause_id"],
-                      "version_date": ", ".join(c["version_date"] for c in t["changes"][-TIMELINE_MAX:])})
+                      "version_date": ", ".join(c["version_date"] for c in t["changes"][-TIMELINE_MAX:]),
+                      "doc": _doc_name(t["path"], t.get("doc_title"))})
     for n, v in enumerate(res["changes"], 1):
         tag = f"H{n}"
         blocks.append(f"[{tag}] " + v["text"])
         cites.append({"tag": tag, "path": v["path"], "clause_id": v["clause_id"], "version_date": v["version_date"],
-                      "change_type": v["change_type"]})
+                      "change_type": v["change_type"], "doc": _doc_name(v["path"], v.get("doc_title"))})
     for n, d in enumerate(res.get("doc_versions", []), 1):
         tag = f"D{n}"
         vs = d["versions"]
         lines = [f"[{tag}] {d['title'] or d['path']} ({d['path']}) 개정 이력: 버전 {len(vs)}개, "
-                 f"최초 {d['first_version']}, 최신 {d['latest_version']}"]
+                 f"최초 {d['first_version']}, 마지막 수집본 {d['latest_version']}"]
         for x in vs[-DOC_VERSIONS_MAX:]:
             eff = f", 시행 {x['effective_date']}" if x["effective_date"] and x["effective_date"] != x["version_date"] else ""
             lines.append(f"· {x['version_date']} ({'최초 수집' if x is vs[0] else '조항 ' + str(x['changed']) + '개 변경'}{eff})")
         blocks.append("\n".join(lines))
-        cites.append({"tag": tag, "path": d["path"], "clause_id": "", "version_date": d["latest_version"]})
+        cites.append({"tag": tag, "path": d["path"], "clause_id": "", "version_date": d["latest_version"],
+                      "doc": _doc_name(d["path"], d.get("title"))})
     for n, a in enumerate(res.get("laws", []), 1):
         tag = f"L{n}"
         name = L.display(a["law"]) + ("" if a["category"] == "법률" else " " + a["category"])
@@ -933,6 +939,43 @@ def context_blocks(res: dict) -> tuple[str, list[dict]]:
                       "version_date": a.get("effective_date") or "", "source_url": a.get("source_url") or "",
                       "kind": "law"})
     return "\n\n---\n\n".join(blocks), cites
+
+
+def _doc_name(path: str, title: str | None) -> str:
+    """근거 문서 이름 ('쿠팡 · 이용약관'). 서비스는 문서가 든 폴더다."""
+    return S.doc_label({"path": path, "service": path.rsplit("/", 1)[0], "doc_title": title or ""})
+
+
+# 수집본은 회사가 지금 게시한 약관과 다를 수 있다. 빠지면 안 되는 안내라서 LLM 에 맡기지 않고 코드가 답변 끝에 붙인다
+VERSION_NOTE = "이 조항은 최신이 아닐 수 있습니다."
+
+
+def version_note(cites: list[dict], db=None) -> str:
+    """답변이 인용한 약관 문서마다 이 서비스가 아는 최신 버전(마지막으로 수집한 개정일)을 밝히는 안내. 법령(L)은 뺀다.
+    날짜는 이력 DB 의 latest_version, DB 가 없으면 현재 조항(C)·문서 개정 목록(D) 근거의 날짜.
+    T·H 근거의 날짜는 과거 변경일이라 최신 버전으로 쓰지 않는다."""
+    docs: dict[str, tuple[str, str]] = {}
+    for c in cites:
+        if c.get("kind") == "law" or not c.get("path"):
+            continue
+        d = db.document(c["path"]) if db else None
+        date = (d or {}).get("latest_version") or (c.get("version_date", "") if c["tag"][0] in "CD" else "")
+        name = c.get("doc") or (_doc_name(c["path"], d["title"]) if d else c["path"])
+        if c["path"] not in docs or (date and not docs[c["path"]][1]):
+            docs[c["path"]] = (name, date)
+    if not docs:
+        return ""
+    items = [f"{name} {date} 버전" if date else name for name, date in docs.values()]
+    if len(items) == 1:
+        return f"※ 현재 제가 알고 있는 버전은 {items[0]}입니다. {VERSION_NOTE}"
+    return ("※ 현재 제가 알고 있는 버전은 다음과 같습니다. 이 조항들은 최신이 아닐 수 있습니다.\n"
+            + "\n".join("· " + i for i in items))
+
+
+def with_version_note(text: str, cites: list[dict], used: set[str], db=None) -> str:
+    """답변 끝에 버전 안내를 붙인다. 인용한 근거 기준, 인용이 없으면 답변에 쓴 근거 전부."""
+    note = version_note([c for c in cites if c["tag"] in used] or cites, db)
+    return text.rstrip() + "\n\n" + note if note else text
 
 
 TIMELINE_MAX = 8              # 조항 이력 하나에 넣을 최대 변경 수 (최근 것부터)
@@ -949,5 +992,6 @@ def answer(question: str, retriever: Retriever, llm: LLM, rewrite: bool = True, 
     ctx, cites = context_blocks(res)
     text = llm(ANSWER_SYSTEM, f"[근거]\n{ctx}\n\n[질문]\n{question}")
     used = set(re.findall(r"\[([CTHDL]\d+)\]", text))
+    text = with_version_note(text, cites, used, getattr(retriever, "db", None))
     return {"answer": text, "citations": [c for c in cites if c["tag"] in used], "retrieved": cites,
             "filter": res["where"], "queries": res["queries"], "plan": res.get("plan")}

@@ -9,6 +9,7 @@
 - BaselineScorer: 키워드 규칙 기준선. Jev 없이 파이프라인 전체를 돌려 보고 테스트하기 위한 것이며,
   유불리 판단의 품질을 대표하지 않는다.
 - CachedScorer: (채점기, 문서 종류, 조항 텍스트) 해시로 결과를 저장해 바뀐 조항만 새로 채점한다.
+  수탁사·대리점 목록처럼 긴 목록 항은 채점 대상이 아니다 (skip_list, 채점기를 부르지 않는다).
 """
 import json
 import math
@@ -155,13 +156,41 @@ class BaselineScorer:
 
 
 # ---------------------------------------------------------------------------
+# 채점 제외: 긴 목록 항
+# ---------------------------------------------------------------------------
+# 목록이어도 짧은 항(제재 기준표, 분쟁 조항 1·2호 등, 이 코퍼스에서 최대 1,453자)은 유불리를 따질 내용이라 채점한다.
+# 이보다 긴 목록은 KT 수탁사·대리점 목록(4만~14만 자)뿐이었고, 매달 이름이 바뀌어 의미 없는 채점을 되풀이했다.
+LIST_SKIP_CHARS = 5000
+SKIPPED = "skip:list"
+
+
+def is_list(text: str) -> bool:
+    """이름 나열·표 조각: 줄 대부분이 표 줄이거나, 짧은 줄(평균 25자 이하)이 15줄 이상. 의미 검색으로 얻을 게 적다."""
+    lines = [s.strip() for s in text.split("\n") if s.strip()]
+    if not lines:
+        return False
+    table = sum(s.startswith("|") for s in lines) / len(lines) >= 0.8
+    return table or (len(lines) >= 15 and sum(map(len, lines)) / len(lines) <= 25)
+
+
+def skip_list(it: Item) -> bool:
+    """채점하지 않을 항: LIST_SKIP_CHARS 보다 긴 목록."""
+    return len(it.text) > LIST_SKIP_CHARS and is_list(it.text)
+
+
+def skipped_score() -> Score:
+    """채점하지 않은 항의 자리 표시: 중립, 신뢰도 0. 조 점수(가장 불리한 항)를 끌어내리지 않는다."""
+    return Score(0.0, 0.0, [0.0, 0.0, 1.0, 0.0, 0.0], SKIPPED)
+
+
+# ---------------------------------------------------------------------------
 # 캐시: 최초 수집 시 전체, 이후 바뀐 조항만 채점
 # ---------------------------------------------------------------------------
 class CachedScorer:
     def __init__(self, inner, path: Path):
         self.inner, self.path, self.name = inner, Path(path), inner.name
         self.cache: dict[str, dict] = {}
-        self.hits = self.misses = 0
+        self.hits = self.misses = self.skipped = 0
         if self.path.exists():
             for line in self.path.read_text(encoding="utf-8").splitlines():
                 rec = json.loads(line)
@@ -171,9 +200,11 @@ class CachedScorer:
         return content_hash(f"{self.name}\n{it.doc_type}\n{it.title}\n{it.text}")
 
     def score(self, items: list[Item]) -> list[Score]:
-        keys = [self.key(it) for it in items]
-        todo = [i for i, k in enumerate(keys) if k not in self.cache]
-        self.hits += len(items) - len(todo)
+        skip = [skip_list(it) for it in items]
+        self.skipped += sum(skip)
+        keys = [None if sk else self.key(it) for it, sk in zip(items, skip)]
+        todo = [i for i, k in enumerate(keys) if k is not None and k not in self.cache]
+        self.hits += len(items) - sum(skip) - len(todo)
         self.misses += len(todo)
         if todo:
             fresh = self.inner.score([items[i] for i in todo])
@@ -182,7 +213,7 @@ class CachedScorer:
                 for i, s in zip(todo, fresh):
                     self.cache[keys[i]] = s.__dict__
                     f.write(json.dumps({"key": keys[i], "score": s.__dict__}, ensure_ascii=False) + "\n")
-        return [Score(**self.cache[k]) for k in keys]
+        return [skipped_score() if k is None else Score(**self.cache[k]) for k in keys]
 
 
 def make_scorer(kind: str, cache_dir: Path):

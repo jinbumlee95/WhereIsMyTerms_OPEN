@@ -10,7 +10,7 @@ import re
 # 서비스 -> 표시 이름
 NAMES = {
     "naver": "네이버", "navercloud": "네이버 클라우드 플랫폼", "kakao": "카카오",
-    "coupang": "쿠팡", "kt": "KT", "tving": "티빙", "krafton/pubg": "배틀그라운드(PUBG)",
+    "coupang": "쿠팡", "kt": "KT", "tving": "티빙", "toss": "토스", "krafton/pubg": "배틀그라운드(PUBG)",
     "nexon/mabinogimobile": "마비노기 모바일", "riotgames": "라이엇 게임즈",
     "riotgames/leagueoflegends": "리그 오브 레전드", "riotgames/valorant": "발로란트", "riotgames/2xko": "2XKO",
     "riotgames/legendsofruneterra": "레전드 오브 룬테라", "riotgames/wildrift": "와일드 리프트",
@@ -19,7 +19,7 @@ NAMES = {
 
 # 회사(최상위 폴더) -> 표시 이름. 회사를 골라 달라고 되물을 때, 회사 목록을 보여 줄 때
 COMPANY_NAMES = {"coupang": "쿠팡", "kt": "KT", "tving": "티빙", "riotgames": "라이엇 게임즈",
-                 "naver": "네이버", "navercloud": "네이버 클라우드 플랫폼", "kakao": "카카오",
+                 "naver": "네이버", "navercloud": "네이버 클라우드 플랫폼", "kakao": "카카오", "toss": "토스",
                  "krafton": "크래프톤 (배틀그라운드)", "nexon": "넥슨 (마비노기 모바일)"}
 
 
@@ -35,6 +35,7 @@ ALIASES = {
     "coupang": ["쿠팡", "로켓와우", "와우 멤버십", "와우멤버십"],
     "kt": ["kt", "케이티"],
     "tving": ["티빙", "tving"],
+    "toss": ["토스", "toss", "비바리퍼블리카"],
     "krafton/pubg": ["배틀그라운드", "배그", "pubg", "펍지", "크래프톤"],
     "nexon/mabinogimobile": ["마비노기 모바일", "마비노기", "마모", "넥슨"],
     "riotgames": ["라이엇 게임즈", "라이엇게임즈", "라이엇", "riot", "tft", "전략적 팀 전투", "롤토체스"],
@@ -79,10 +80,20 @@ def doc_label(c: dict) -> str:
     return f"{display_name(c['service'])} · {c.get('doc_title') or ''}" + (f" ({p})" if p else "")
 
 
-def _hit(name: str, q: str) -> bool:
+# 한글 별칭 뒤에 오면 다른 말이 되는 글자 ("토스트"는 토스가 아니다)
+NOT_FOLLOWED = {"토스": "트"}
+
+
+def _pat(name: str) -> str:
     # 영문 별칭(kt, lol)은 단어 경계로, 한글은 앞 글자가 한글이 아닐 때만 ("컨트롤"의 "롤" 제외)
-    pat = rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])" if name.isascii() else rf"(?<![가-힣]){re.escape(name)}"
-    return re.search(pat, q) is not None
+    if name.isascii():
+        return rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])"
+    after = NOT_FOLLOWED.get(name)
+    return rf"(?<![가-힣]){re.escape(name)}" + (f"(?![{after}])" if after else "")
+
+
+def _hit(name: str, q: str) -> bool:
+    return re.search(_pat(name), q) is not None
 
 
 def detect(query: str) -> dict:
@@ -93,7 +104,7 @@ def detect(query: str) -> dict:
     # Consume longer names first so '네이버 클라우드' does not also select 네이버.
     for name, svc in sorted(((n, s) for s, names in ALIASES.items() for n in names),
                             key=lambda pair: len(pair[0]), reverse=True):
-        pat = rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])" if name.isascii() else rf"(?<![가-힣]){re.escape(name)}"
+        pat = _pat(name)
         if re.search(pat, q):
             if svc not in found:
                 found.append(svc)
@@ -106,6 +117,14 @@ def detect(query: str) -> dict:
         # 하위 서비스 + 회사 공통(루트) 문서. 루트 서비스가 없는 회사(krafton 등)는 하위 서비스만 걸린다.
         return {"service": sorted(set(subs) | {s.split("/")[0] for s in subs})}
     return {"company": sorted(companies) if len(companies) > 1 else companies.pop()}
+
+
+def single_company(query: str) -> str | None:
+    """질문이 가리키는 회사가 하나면 그 회사(최상위 폴더), 없거나 여럿이면 None. 추천 질문을 누를 때 회사를 바꾸는 데 쓴다."""
+    f = detect(query)
+    found = {s.split("/")[0] for s in f.get("service", [])} | set([f["company"]] if isinstance(f.get("company"), str)
+                                                                 else f.get("company", []))
+    return found.pop() if len(found) == 1 else None
 
 
 def preferred_docs(query: str) -> list[str]:
