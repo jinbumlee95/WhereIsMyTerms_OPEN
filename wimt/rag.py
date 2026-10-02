@@ -35,7 +35,7 @@ from . import laws as L
 from . import services as S
 from .normalize import content_hash
 
-LLM_MODEL = "gpt-5.4-mini"
+LLM_MODEL = "gpt-6-luna"   # 2026-10-02 평가: gpt-5.4-mini 보다 맞음 78% → 84%, 질문당 LLM 비용 약 1/6 (대신 약 2.5배 느림)
 RRF_K = 60
 BM25_WEIGHT = 0.5              # 하이브리드에서 BM25 순위의 RRF 가중치 (벡터는 1). 사용자 말투 질문(qa-vague)에서
                                # BM25 가 순위를 흐트러뜨려 낮췄다. 원래 질문 성적은 1.0 과 같고 모호한 질문이 가장 좋았다.
@@ -304,6 +304,15 @@ class Retriever:
         self.lineage.update({e["id"]: f"{e['meta']['path']}::{e['meta']['lineage']}" for e in ces})
         self.sla_paths = sorted({e["meta"]["path"] for c in (self.clauses, self.changes) for e in c.entries
                                  if SLA_TITLE.search(e["meta"].get("doc_title") or "")})
+        # 지금 약관에는 없고 변경 기록에만 있는 말 ("M머니")을 찾는 데 쓴다 (gone_terms)
+        self._current_text = "\n".join(e["text"] for e in self.clauses.entries).lower()
+        self._history_text = "\n".join(e["text"] for e in self.changes.entries).lower()
+
+    def gone_terms(self, query: str) -> list[str]:
+        """질문 속 낱말 중 수집본 현재 조항에는 없고 변경 기록에만 있는 것. 없어진 제도·상품 이름이다.
+        2026-10-02: "티빙 M머니는 언제 제한돼?"가 현재 조항만 찾아 티빙포인트로 바꿔 답했다 (M머니는 2016년 조항에만 있다)."""
+        words = {_JOSA.sub("", w) for w in re.findall(r"[0-9A-Za-z가-힣]{2,}", query.lower())}
+        return sorted(w for w in words if len(w) >= 2 and w not in self._current_text and w in self._history_text)
 
     def excluded(self, query: str) -> dict:
         """전체 회사 검색에서 뺄 조각 조건: SLA 문서. 질문이 SLA·서비스 수준·가용률을 물으면 빼지 않는다."""
@@ -370,6 +379,9 @@ class Retriever:
         변경 검색은 이력이 안 잡혔거나, 날짜를 짚었거나, 삭제·폐지를 물을 때만 한다 (이미 삭제된 조항은 현재 조항
         검색에 걸리지 않으므로)."""
         plan = plan or plan_query(query, llm)
+        gone = self.gone_terms(query)
+        if gone and plan["intent"] == "current":     # 없어진 이름을 물으면 변경 이력도 찾는다 (현재 조항 검색은 그대로)
+            plan = {**plan, "intent": "clause_history"}
         d_from, d_to = plan["date_from"], plan["date_to"]
         queries = [query] + plan["queries"]
         vecs = self.embedder.query(queries) if mode != "bm25" else None
@@ -380,7 +392,7 @@ class Retriever:
         clauses = (self.clauses.search_diverse(queries, vecs, k, mode, with_refs, boosts=b, exclude=x) if diverse
                    else self.clauses.search(queries, vecs, k, w, mode, with_refs, boosts=b))
         res = {"plan": plan, "where": w, "queries": queries, "timelines": [], "changes": [], "doc_versions": [],
-               "clauses": clauses, "diverse": diverse, "sla_excluded": bool(x)}
+               "clauses": clauses, "diverse": diverse, "sla_excluded": bool(x), "gone_terms": gone}
         if plan["intent"] == "current":
             return res
 
@@ -443,18 +455,31 @@ class Retriever:
 # ---------------------------------------------------------------------------
 # LLM
 # ---------------------------------------------------------------------------
+# 답을 쓰기 전에 생각하는(reasoning) 모델: 생각 단계 길이(reasoning_effort)를 정할 수 있다 (none / low / medium …)
+REASONING_PREFIXES = ("gpt-6",)
+LLM_EFFORT = "low"   # 2026-10-02 원래 질문 96개: 기본 생각 단계 맞음 84%·13.4초 → low 82%·8.3초 (틀림 0, 차이는 흔들림 범위), 비용 약 30% 절감
+
+
 class LLM:
-    def __init__(self, model: str = LLM_MODEL):
+    def __init__(self, model: str = LLM_MODEL, effort: str | None = LLM_EFFORT):
+        """effort: 이 LLM 의 모든 호출에 줄 생각 단계 길이 (None 이면 모델 기본). 호출마다 effort= 로 바꿀 수 있다."""
         from openai import OpenAI
 
-        self.client, self.model = OpenAI(max_retries=8), model   # 분당 토큰 한도(429)는 기다렸다 재시도
+        self.client, self.model, self.effort = OpenAI(max_retries=8), model, effort   # 분당 토큰 한도(429)는 기다렸다 재시도
         self.tokens = 0
+        self.input_tokens = self.output_tokens = self.calls = 0   # 비용 비교용 (입력·출력 단가가 다르다)
 
-    def __call__(self, system: str, user: str, json_mode: bool = False) -> str:
+    def __call__(self, system: str, user: str, json_mode: bool = False, effort: str | None = None) -> str:
+        kw = {"response_format": {"type": "json_object"}} if json_mode else {}
+        effort = effort or self.effort
+        if effort and self.model.startswith(REASONING_PREFIXES):
+            kw["reasoning_effort"] = effort
         r = self.client.chat.completions.create(
-            model=self.model, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            **({"response_format": {"type": "json_object"}} if json_mode else {}))
+            model=self.model, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}], **kw)
         self.tokens += r.usage.total_tokens
+        self.input_tokens += r.usage.prompt_tokens
+        self.output_tokens += r.usage.completion_tokens
+        self.calls += 1
         return r.choices[0].message.content
 
 
@@ -526,7 +551,22 @@ def dates_in(query: str) -> tuple[str | None, str | None]:
                 spans.append((f"{y:04d}-01-01", f"{y:04d}-12-31"))
     if not spans:
         return None, None
-    return min(s for s, _ in spans), max(e for _, e in spans)
+    d_from, d_to = min(s for s, _ in spans), max(e for _, e in spans)
+    if len(spans) == 1:                                   # "2024년 이후", "2020년 전까지": 한쪽이 열린 기간
+        tail = query[max(b for _, b in used):][:6]
+        if _AFTER.match(tail):
+            d_to = None
+        elif _BEFORE.match(tail):
+            d_from = None
+            if not re.match(r"\s*까지", tail):          # "2020년 이전" 은 2020년을 빼고, "2020년까지" 는 넣는다
+                import datetime as _dt
+                d_to = (_dt.date.fromisoformat(spans[0][0]) - _dt.timedelta(days=1)).isoformat()
+    return d_from, d_to
+
+
+_JOSA = re.compile(r"(?:에서는|으로는|에서|으로|이랑|은|는|이|가|을|를|의|에|로|도|만|과|와|랑)$")
+_AFTER = re.compile(r"\s*(?:도\s*)?(?:이후|이래|부터|후로|후에|지나서|넘어서)")
+_BEFORE = re.compile(r"\s*(?:이전|전까지|전에|전엔|전(?![가-힣])|까지)")
 
 
 _MONTH_DAY = re.compile(r"(?<![\d년])\s*(\d{1,2})\s*월(?:\s*(\d{1,2})\s*일)?")
@@ -534,7 +574,7 @@ _MONTH_DAY = re.compile(r"(?<![\d년])\s*(\d{1,2})\s*월(?:\s*(\d{1,2})\s*일)?"
 
 def month_day_in(query: str) -> str | None:
     """연도 없이 월(일)만 짚은 날짜 -> "07-25" 또는 "07". 연도가 있는 날짜는 dates_in 이 맡는다."""
-    if dates_in(query)[0]:
+    if any(dates_in(query)):
         return None
     m = _MONTH_DAY.search(re.sub(r"\d{2,4}\s*년\s*\d{1,2}\s*월", "", query))
     if not m or not 1 <= int(m.group(1)) <= 12:
@@ -564,13 +604,13 @@ def plan_query(query: str, llm: "LLM | None") -> dict:
         except Exception:
             pass
     d_from, d_to = dates_in(query)
-    if d_from:
+    if d_from or d_to:
         plan["date_from"], plan["date_to"] = d_from, d_to
     elif not all(_year_in(query, d) for d in (plan["date_from"], plan["date_to"]) if d):
         # 연도 없는 "7월 25일"에 LLM 이 연도를 지어 붙인다 (2025-07-25 를 2024 로). 월·일만 연도 없이 쓴다.
         plan["date_from"] = plan["date_to"] = None
     plan["month_day"] = month_day_in(query)
-    if plan["intent"] == "current" and (plan["date_from"] or plan["month_day"] or _GONE_WORDS.search(query)):
+    if plan["intent"] == "current" and (plan["date_from"] or plan["date_to"] or plan["month_day"] or _GONE_WORDS.search(query)):
         # 날짜를 콕 집거나 "아직 있어?"처럼 삭제 여부를 물으면 이력 질문으로 본다 (삭제된 조항은 현재 조항 검색에 안 걸린다)
         plan["intent"] = "clause_history"
     return plan
@@ -854,8 +894,8 @@ def evaluate(rows: list[dict], retriever: Retriever, modes=("vector", "bm25", "h
                 if q["kind"] == "current":
                     ids = [v["group"] for v in res["clauses"]]
                 else:
-                    # 답변 근거에 실제로 들어가는 것만 센다 (조항 이력은 최근 TIMELINE_MAX 개)
-                    ids = ([c["id"] for t in res["timelines"] for c in t["changes"][-TIMELINE_MAX:]]
+                    # 답변 근거에 실제로 들어가는 것만 센다 (조항 이력은 timeline_shown)
+                    ids = ([c["id"] for t in res["timelines"] for c in timeline_shown(t["changes"])]
                            + [h["group"] for h in res["changes"]])
                     # 문서 개정 질문의 정답(doc:경로::버전일)은 근거에 붙은 문서 개정 목록에서 찾는다
                     ids += [f"doc:{d['path']}::{v['version_date']}" for d in res["doc_versions"] for v in d["versions"]]
@@ -901,6 +941,9 @@ NO_OFFER = """- "원하시면 …해 드릴게요", "더 궁금한 점 있으세
 
 ANSWER_SYSTEM = """너는 한국 온라인 서비스 약관을 설명하는 도우미다. 아래 [근거]에 있는 약관 조항과 변경 이력만 사용해 답한다.
 - 근거에 없는 내용은 추측하지 말고 "제공된 약관에서 찾지 못했다"고 말한다.
+- 질문에 나온 제도·상품·포인트 이름(예: "M머니")이 근거 어디에도 없으면, 근거에 있는 다른 제도로 바꿔 답하지 않는다.
+  "제공된 약관에서 ○○에 관한 내용은 찾지 못했다"고 밝힌다. 근거가 둘이 같은 것이라고 명시한 경우(예: 이름 변경, 전환)만 이어서 설명한다.
+  그 이름이 현재 조항(C)에는 없고 변경 이력(T, H)에만 있으면 "제가 알고 있는 버전에는 ○○가 없고, 예전 약관에는 …"처럼 먼저 그 사실을 말하고 이력으로 답한다.
 - 문장마다 근거 번호를 [C1], [T1], [H2], [D1], [L1] 처럼 붙인다.
   C 는 이 서비스가 마지막으로 수집한 약관 조항, T 는 조항 하나의 변경 이력(날짜순), H 는 검색으로 찾은 개별 변경, D 는 문서 전체의 개정일 목록,
   L 은 약관 조항이 "…법에 따른다"며 인용한 법령 조문(legalize-kr, 적힌 기준일에 시행 중이던 판)이다.
@@ -944,21 +987,23 @@ def context_blocks(res: dict) -> tuple[str, list[dict]]:
     for n, t in enumerate(res.get("timelines", []), 1):
         tag = f"T{n}"
         note = f"전체 {t['total']}건"
-        if res.get("plan", {}).get("date_from"):
-            p = res["plan"]
-            note += (f", 질문한 기간({p['date_from']}~{p['date_to']}) 해당 {len(t['changes'])}건" if t["date_matched"]
-                     else f", 질문한 기간({p['date_from']}~{p['date_to']})에는 변경 없음 → 전체 표시")
+        p = res.get("plan", {})
+        if p.get("date_from") or p.get("date_to"):
+            span = f"{p.get('date_from') or '처음'}~{p.get('date_to') or '수집본'}"
+            note += (f", 질문한 기간({span}) 해당 {len(t['changes'])}건" if t["date_matched"]
+                     else f", 질문한 기간({span})에는 변경 없음 → 전체 표시")
         lines = [f"[{tag}] {t['doc_title'] or t['path']} {t['clause_id']} {t['title']} — 변경 이력 ({note})"]
-        for c in t["changes"][-TIMELINE_MAX:]:
+        shown = timeline_shown(t["changes"])
+        for c in shown:
             body = c["change_text"].split("\n", 1)[-1]
             eff = f", 시행 {c['effective_date']}" if c["effective_date"] and c["effective_date"] != c["version_date"] else ""
             lines.append(f"· {c['version_date']} 개정 ({I.CHANGE_KIND[c['change_type']]}{eff}) [{c['clause_id']}]\n"
                          + body[:TIMELINE_ITEM_CHARS])
-        if len(t["changes"]) > TIMELINE_MAX:
-            lines.insert(1, f"(오래된 변경 {len(t['changes']) - TIMELINE_MAX}건 생략)")
+        if len(t["changes"]) > len(shown):
+            lines.insert(1 + TIMELINE_HEAD, f"(중간 변경 {len(t['changes']) - len(shown)}건 생략)")
         blocks.append("\n".join(lines))
         cites.append({"tag": tag, "path": t["path"], "clause_id": t["clause_id"],
-                      "version_date": ", ".join(c["version_date"] for c in t["changes"][-TIMELINE_MAX:]),
+                      "version_date": ", ".join(c["version_date"] for c in shown),
                       "doc": _doc_name(t["path"], t.get("doc_title"))})
     for n, v in enumerate(res["changes"], 1):
         tag = f"H{n}"
@@ -1029,7 +1074,15 @@ def with_version_note(text: str, cites: list[dict], used: set[str], db=None) -> 
     return text.rstrip() + "\n\n" + note if note else text
 
 
-TIMELINE_MAX = 8              # 조항 이력 하나에 넣을 최대 변경 수 (최근 것부터)
+TIMELINE_MAX = 8              # 조항 이력 하나에 넣을 최대 변경 수
+TIMELINE_HEAD = 2             # 그중 가장 오래된 변경 몇 개 ("언제 생겼어/없어졌어"는 처음 변경을 묻는다), 나머지는 최근 것
+
+
+def timeline_shown(changes: list) -> list:
+    """답변 근거에 넣을 조항 이력: 길면 가장 오래된 TIMELINE_HEAD 개 + 최근 것. 날짜 없는 질문이 처음 변경을 물어도 남는다."""
+    if len(changes) <= TIMELINE_MAX:
+        return list(changes)
+    return list(changes[:TIMELINE_HEAD]) + list(changes[-(TIMELINE_MAX - TIMELINE_HEAD):])
 TIMELINE_ITEM_CHARS = 700
 DOC_VERSIONS_MAX = 30
 

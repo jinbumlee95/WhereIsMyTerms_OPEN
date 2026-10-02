@@ -14,6 +14,7 @@ RAG 에서 쓰는 조회
 """
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 from . import index as I
@@ -107,16 +108,24 @@ class DB:
             raise FileNotFoundError(f"{path} 가 없습니다. 먼저 python -m wimt db 를 실행하세요.")
         self.con = sqlite3.connect(path, check_same_thread=False)
         self.con.row_factory = sqlite3.Row
+        # 웹 서버·평가 도구의 작업 스레드 여럿이 연결 하나를 함께 쓴다. sqlite3 연결은 동시 실행을 막아 주지 않아
+        # 2026-10-02 질문 4개를 동시에 돌리다 "InterfaceError: bad parameter or other API misuse"가 났다.
+        self.lock = threading.Lock()
 
     def _all(self, sql: str, args=()) -> list[dict]:
-        return [dict(r) for r in self.con.execute(sql, args)]
+        with self.lock:
+            return [dict(r) for r in self.con.execute(sql, args)]
+
+    def _one(self, sql: str, args=()):
+        with self.lock:
+            return self.con.execute(sql, args).fetchone()
 
     def document(self, path: str) -> dict | None:
         rows = self._all("SELECT * FROM documents WHERE path = ?", (path,))
         return rows[0] if rows else None
 
     def lineage_of(self, path: str, clause_id: str) -> str | None:
-        row = self.con.execute("SELECT lineage FROM clauses WHERE path = ? AND clause_id = ?", (path, clause_id)).fetchone()
+        row = self._one("SELECT lineage FROM clauses WHERE path = ? AND clause_id = ?", (path, clause_id))
         return row[0] if row else None
 
     def timeline(self, path: str, clause_id: str, date_from: str | None = None, date_to: str | None = None,
@@ -152,7 +161,7 @@ class DB:
         return self._all(sql + " ORDER BY version_date DESC, id LIMIT ?", args + [limit])
 
     def stats(self) -> dict:
-        return {t: self.con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+        return {t: self._one(f"SELECT COUNT(*) FROM {t}")[0]
                 for t in ("documents", "versions", "changes", "unit_changes", "clauses")}
 
 
