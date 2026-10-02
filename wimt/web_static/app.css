@@ -159,6 +159,26 @@ button { font: inherit; cursor: pointer; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .step.running .icon { animation: none; } }
 
+/* 진행 중 근거: 검색·판정·법령 조회가 끝날 때마다 쌓인다 (최종 근거는 답변 아래) */
+.live { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.live-head { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+.live-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 300px; overflow: auto; }
+.live-item { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 8px; align-items: baseline; padding: 6px 10px;
+             border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 12px;
+             transition: opacity .3s, border-color .3s, background .3s; }
+.live-item.new { animation: live-in .35s ease-out both; }
+@keyframes live-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.live-item .kind { font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.live-item.law .kind { background: var(--warn-soft); color: var(--warn); }
+.live-item .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-item .snip { grid-column: 2 / 4; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-item .verdict { font-size: 11px; white-space: nowrap; color: var(--muted); }
+.live-item.judging .verdict::after { content: "판정 대기"; }
+.live-item.kept { border-color: var(--ok); background: var(--ok-soft); }
+.live-item.kept .verdict { color: var(--ok); font-weight: 600; }
+.live-item.dropped { opacity: .5; }
+@media (prefers-reduced-motion: reduce) { .live-item.new { animation: none; } .live-item { transition: none; } }
+
 .error { border-color: var(--err); background: var(--err-soft); color: var(--err); }
 .notice { padding: 10px 12px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); margin-bottom: 12px; font-size: 14px; }
 .answer p { margin: 0 0 10px; }

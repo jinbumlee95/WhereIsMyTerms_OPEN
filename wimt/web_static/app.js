@@ -155,6 +155,7 @@ function resetSteps() {
   steps = {};
   stepStart = {};
   stepTotal = {};
+  resetLive();
   $("steps").innerHTML = PLAN.map((s) => `<li class="step pending" id="step-${s.node}" ${s.optional ? "hidden" : ""}>
       <span class="icon"></span><div><div class="label">${s.label}</div>
       <div class="detail">대기</div><div class="step-time"></div></div></li>`).join("");
@@ -371,6 +372,42 @@ function stopTimer(ms, ok) {
   $("timer").textContent = fmt(ms);
 }
 
+// ------------------------------------------------------------------ 진행 중 근거 (연출)
+// 검색·근거 판정·법령 조회·추가 검색이 끝날 때마다 서버가 보내는 근거 목록(live)을 바로 쌓아 보인다.
+// 새로 나온 근거는 하나씩 떠오르고, 판정이 끝나면 채택한 근거가 위로 올라와 관련도가 붙는다. 답변은 최종 근거로만 만든다.
+const LIVE_KIND = { C: "수집본 조항", T: "조항 이력", H: "변경 기록", D: "개정 목록", L: "법령" };
+let liveSeen = new Set();
+
+function resetLive() {
+  liveSeen = new Set();
+  $("live").hidden = true;
+  $("live-list").innerHTML = "";
+  $("live-title").textContent = "찾은 근거";
+}
+
+function onLive(ev) {
+  const items = ev.items || [];
+  if (!items.length) return;
+  const judged = items.some((x) => x.grade !== null);
+  const order = judged ? [...items].sort((a, b) => (b.kept - a.kept) || ((b.grade ?? -1) - (a.grade ?? -1))) : items;
+  let fresh = 0;
+  $("live-list").innerHTML = order.map((x) => {
+    const isNew = !liveSeen.has(x.id);
+    const state = x.grade === null ? "judging" : x.kept ? "kept" : "dropped";
+    const verdict = x.grade === null ? "" : x.kept ? `관련 ${x.grade.toFixed(2)}` : `제외 ${x.grade.toFixed(2)}`;
+    const delay = isNew ? ` style="animation-delay:${Math.min(fresh++, 12) * 70}ms"` : "";
+    const date = x.date ? ` · ${esc(x.date)}` : "";
+    return `<li class="live-item ${state}${x.kind === "L" ? " law" : ""}${isNew ? " new" : ""}"${delay}>
+      <span class="kind">${LIVE_KIND[x.kind] || x.kind}</span><span class="name" title="${esc(x.label)}">${esc(x.label)}${date}</span>
+      <span class="verdict">${verdict}</span><span class="snip">${esc(x.snippet)}</span></li>`;
+  }).join("");
+  items.forEach((x) => liveSeen.add(x.id));
+  const kept = items.filter((x) => x.kept).length;
+  $("live-count").textContent = judged ? `${items.length}건 중 관련 ${kept}건` : `${items.length}건`;
+  $("live-title").textContent = ev.node === "laws" ? "찾은 근거 · 법령 조회 반영" : ev.node === "expand" ? "찾은 근거 · 추가 검색 반영" : "찾은 근거";
+  $("live").hidden = false;
+}
+
 // ------------------------------------------------------------------ 질문 보내기 (SSE)
 async function ask(question, { allCompanies = false } = {}) {
   $("question").value = question;
@@ -405,11 +442,13 @@ async function ask(question, { allCompanies = false } = {}) {
         const ev = JSON.parse(data);
         if (ev.type === "status") { $("status").hidden = false; $("status").textContent = ev.message; }
         else if (ev.type === "step") { $("status").hidden = true; onStep(ev); }
+        else if (ev.type === "live") onLive(ev);
         else if (ev.type === "result") {
           ev.elapsed_ms = elapsed();                    // 걸린 시간 (최근 대화에서 다시 볼 때도 보이게 결과에 담는다)
           stopTimer(ev.elapsed_ms, true);
           ok = true;
           renderResult(ev, question); addTurn(ev);
+          if ((ev.evidence || []).length) $("live").hidden = true;   // 최종 근거가 답변 아래에 뜨면 진행 중 목록은 접는다
         }
         else if (ev.type === "error") throw new Error(ev.message);
       }

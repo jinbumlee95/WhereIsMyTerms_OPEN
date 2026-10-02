@@ -3,6 +3,7 @@
 - 서버는 표준 라이브러리(ThreadingHTTPServer). 화면은 web_static/ 의 HTML·CSS·JS (빌드 없음).
 - POST /api/ask/stream: LangGraph 를 stream_mode=["tasks", "values"] 로 돌려, 노드가 시작·끝날 때마다
   SSE 이벤트를 보낸다 (Jev 판정처럼 몇 초 걸리는 단계도 "진행 중"으로 보인다). 마지막에 답변·인용·근거.
+  검색·근거 판정·법령 조회·추가 검색이 끝날 때마다 그때까지 찾은 근거 목록(live)도 보내, 화면이 근거를 바로 쌓아 보인다.
 - 여러 사용자가 동시에 쓴다: 작업 스레드 WORKERS 개(WIMT_WEB_WORKERS, 기본 4)가 흐름 하나를 함께 쓰고,
   넘치는 질문은 QUEUE 개까지 기다리게 한 뒤(화면에 '앞에 n개' 상태), 그보다 많으면 503 으로 거절한다.
 """
@@ -123,6 +124,32 @@ def step_info(result: dict) -> dict:
     return info
 
 
+LIVE_STEPS = ("retrieve", "grade", "laws", "expand")   # 끝나면 지금까지 찾은 근거를 화면에 바로 보낸다
+LIVE_SNIPPET = 140                                      # 진행 중 근거 카드에 보일 본문 앞부분 글자 수
+LIVE_MAX = 40                                           # 한 번에 보낼 근거 수 (넘으면 관련도 높은 순으로 자른다)
+
+
+def live_evidence(state: dict) -> list[dict]:
+    """진행 중에 보여 줄 근거 목록: 찾은 근거마다 이름과 본문 앞부분, 판정을 마쳤으면 관련도와 채택 여부.
+    연출용 미리보기이고 답변은 최종 결과의 근거(evidence)로만 만든다."""
+    if not state.get("res"):
+        return []
+    grades, kept = state.get("grades") or {}, set(state.get("relevant") or [])
+    out = []
+    for e in flow.evidence(state["res"]):
+        body = e["text"].split("\n", 1)[-1] if "\n" in e["text"] else e["text"]
+        g = grades.get(e["id"])
+        out.append({"id": e["id"], "kind": e["id"][0],
+                    "label": " · ".join(x for x in (e["document"], e["clause"], e["title"]) if x),
+                    "date": e.get("version_date") or "", "change_type": e.get("change_type") or "",
+                    "snippet": re.sub(r"\s+", " ", body).strip()[:LIVE_SNIPPET],
+                    "grade": round(g, 2) if g is not None else None,
+                    "kept": (e["id"] in kept) if g is not None else None})
+    if len(out) > LIVE_MAX:
+        out = sorted(out, key=lambda x: -(x["grade"] or 0))[:LIVE_MAX]
+    return out
+
+
 WORKERS = int(os.environ.get("WIMT_WEB_WORKERS") or 4)   # 동시에 처리하는 질문 수 (여러 사용자)
 QUEUE = WORKERS * 2                                        # 처리 중인 질문 외에 기다릴 수 있는 질문 수
 
@@ -197,11 +224,14 @@ class WebApp:
 
         def run():
             try:
-                final = None
+                final, live_due = None, None
                 for mode, ev in self.flow_app().stream(flow.start_state(question, company, all_companies, history),
                                                        stream_mode=["tasks", "values"]):
                     if mode == "values":
                         final = ev
+                        if live_due:                 # 근거가 바뀌는 단계가 끝난 직후의 상태로 근거 목록을 보낸다
+                            events.put({"type": "live", "node": live_due, "items": live_evidence(ev)})
+                            live_due = None
                     elif "input" in ev:
                         events.put({"type": "step", "node": ev["name"], "label": STEP_NAMES.get(ev["name"], ev["name"]),
                                     "status": "running"})
@@ -209,6 +239,8 @@ class WebApp:
                         events.put({"type": "step", "node": ev["name"], "label": STEP_NAMES.get(ev["name"], ev["name"]),
                                     "status": "error" if ev.get("error") else "done",
                                     "info": step_info(ev.get("result") or {})})
+                        if ev["name"] in LIVE_STEPS and not ev.get("error"):
+                            live_due = ev["name"]
                 events.put({"type": "result", "answer": final.get("answer", ""), "citations": final.get("citations", []),
                             "evidence": evidence(final, self.sources, self.links), "route": final.get("route"), "choices": final.get("choices", []),
                             "suggestions": final.get("suggestions", []),
