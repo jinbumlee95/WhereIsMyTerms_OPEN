@@ -13,6 +13,7 @@ tools/
 docs/*
 !docs/rag-pipeline.png
 !docs/web-screenshot.png
+!docs/web-demo.gif
 CLAUDE.md
 AGENTS.md
 README_OPEN.md
