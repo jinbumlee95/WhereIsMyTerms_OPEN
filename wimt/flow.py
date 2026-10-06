@@ -14,6 +14,7 @@
 Jev(typesafe.ai)는 판정 모델이라 글을 쓰지 않는다. 판정(분기·근거 평가)은 Jev, 글(즉시 답변·검색어·최종 답변)은 LLM.
 Jev 분기 실패는 RAG, 근거 판정 실패는 unknown으로 기록하고 답변을 보류한다.
 """
+import hashlib
 import json
 import math
 import os
@@ -237,6 +238,13 @@ def batches(sizes: list[int], limit: int = JEV_BATCH_CHARS) -> list[list[int]]:
     return out + ([cur] if cur else [])
 
 
+def grade_key(kind, doc: dict) -> str:
+    """관련도 판정 재사용 키: 질문 종류(일반·전체 회사·법령)와 Jev 에 보내는 문서 전체(메타데이터·잘린 본문).
+    같은 근거 id 라도 펼친 조각이 달라 본문이 바뀌면 다시 판정한다."""
+    raw = kind.__name__ + "\0" + json.dumps(doc, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def fit_context(res: dict, ranked: list[str], limit: int = CONTEXT_MAX_CHARS) -> tuple[str, list[dict], list[str]]:
     """관련 근거(관련도 높은 순)로 문맥을 만들되 limit 를 넘으면 관련도가 낮은 근거부터 뺀다.
     근거 하나만으로도 넘으면 문맥 끝을 자른다. 충분성 판정과 답변이 같은 문자열을 쓰므로 둘 다 이 결과를 쓴다."""
@@ -321,6 +329,7 @@ class State(TypedDict, total=False):
     question_meta: dict          # 최초 질문의 범위·기간. 추가 검색으로 덮어쓰지 않는다
     res: dict                    # 지금까지 모은 근거 (retriever.route 결과 형식)
     grades: dict                 # 이번 회차의 근거 id -> 관련 점수 (내용이 바뀌면 재판정)
+    grade_memo: dict             # grade_key -> 관련 점수. 앞 회차에 판정한 근거를 다시 묻지 않는다
     relevant: list               # 관련 있다고 본 근거 id
     sufficient_prob: float
     sufficiency_status: str      # sufficient | insufficient | unknown
@@ -502,15 +511,21 @@ def build(retriever: "rag.Retriever", llm: "rag.LLM", judge, *, mode: str = "hyb
         meta = state["question_meta"]
         cross = bool(res.get("diverse"))               # 회사를 가리지 않은 질문: 회사별로 따로 판정한다
         docs = [{**{k: v for k, v in e.items() if k != "id"}, "text": clip(e["text"], GRADE_DOC_CHARS)} for e in items]
-        groups = batches([len(d["text"]) for d in docs])
+        kinds = [relevance_question_law if e["id"].startswith("L:") else
+                 relevance_question_cross if cross else relevance_question for e in items]
+        # 앞 회차에 같은 질문 종류·같은 판정 문서로 판정한 근거는 다시 묻지 않는다. question·question_meta 는
+        # retrieve 뒤 바뀌지 않으므로 결과는 같다 (2026-10-06: 판정 4,637건 중 45%가 재판정이었다)
+        memo, keys = dict(state.get("grade_memo") or {}), [grade_key(f, d) for f, d in zip(kinds, docs)]
+        todo = [i for i, k in enumerate(keys) if k not in memo]
+        groups = batches([len(docs[i]["text"]) for i in todo])
         try:
             for group in groups:                    # 요청 크기 제한 때문에 나눠 묻는다 (근거마다 독립 판정이라 결과는 같다)
-                questions = {f"rel_{j}": (relevance_question_law if items[i]["id"].startswith("L:") else
-                                          relevance_question_cross if cross else relevance_question)(j)
-                             for j, i in enumerate(group)}
+                group = [todo[g] for g in group]
+                questions = {f"rel_{j}": kinds[i](j) for j, i in enumerate(group)}
                 got = judge({"question": state["question"], "question_meta": meta,
                              "documents": [docs[i] for i in group]}, questions)
-                grades.update({items[i]["id"]: probability(got[f"rel_{j}"]) for j, i in enumerate(group)})
+                memo.update({keys[i]: probability(got[f"rel_{j}"]) for j, i in enumerate(group)})
+            grades = {e["id"]: memo[k] for e, k in zip(items, keys)}
             note = {}
         except Exception as e:
             grades = {}
@@ -524,9 +539,11 @@ def build(retriever: "rag.Retriever", llm: "rag.LLM", judge, *, mode: str = "hyb
             if have < LAW_MAX_ARTICLES:
                 pending = cited_laws(res, relevant, set(state.get("law_seen", [])), grades)
         best = state.get("best_relevant", 0) if note else max(state.get("best_relevant", 0), len(ranked))
-        return {"grades": grades, "relevant": relevant, "cross": cross, "covered": covered, "best_relevant": best,
-                "grade_error": bool(note), "context": ctx, "context_citations": cites, "law_pending": pending,
+        return {"grades": grades, "grade_memo": memo, "relevant": relevant, "cross": cross, "covered": covered,
+                "best_relevant": best, "grade_error": bool(note), "context": ctx, "context_citations": cites,
+                "law_pending": pending,
                 "trace": log(state, "grade", items=len(items), judged=len(grades), requests=len(groups),
+                             reused=len(items) - len(todo),
                              relevant=len(relevant), dropped=len(ranked) - len(relevant),
                              cross=cross, covered=covered, laws_cited=len(pending), grades=grades, **note)}
 
