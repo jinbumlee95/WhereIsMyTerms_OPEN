@@ -8,7 +8,8 @@
     check_context (Jev) 실제 답변용 문맥이 질문 전체를 해결하기에 충분한가
     expand              부족하면 원래 조건을 유지하며 검색어·후보 수를 늘린다 (최대 2회)
     answer (LLM)        충분하다고 판정한 동일 문맥으로 답한다
-    abstain             끝내 부족하거나 판정 실패면 답변을 보류한다 (LLM 호출 없음)
+    abstain             끝내 부족하거나 판정 실패면 답변을 보류한다 (LLM 호출 없음).
+                        날짜 없는 이력 질문이 부족으로 끝나면 관련 변경의 날짜를 되묻는다 (date_choices)
 
 Jev(typesafe.ai)는 판정 모델이라 글을 쓰지 않는다. 판정(분기·근거 평가)은 Jev, 글(즉시 답변·검색어·최종 답변)은 LLM.
 Jev 분기 실패는 RAG, 근거 판정 실패는 unknown으로 기록하고 답변을 보류한다.
@@ -20,6 +21,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import TypedDict
 
+from . import index as I
 from . import laws as L
 from . import rag
 from . import services as S
@@ -314,6 +316,7 @@ class State(TypedDict, total=False):
     route_prob: float
     company_prob: float          # 회사를 안 밝힌 회사별 질문일 확률
     choices: list                # clarify: 고를 수 있는 회사 [{id, name}]
+    date_choices: list           # abstain: 날짜 없는 이력 질문에서 고를 변경 [{date, label, question}]
     plan: dict
     question_meta: dict          # 최초 질문의 범위·기간. 추가 검색으로 덮어쓰지 않는다
     res: dict                    # 지금까지 모은 근거 (retriever.route 결과 형식)
@@ -640,8 +643,11 @@ def build(retriever: "rag.Retriever", llm: "rag.LLM", judge, *, mode: str = "hyb
 
     def abstain(state: State) -> dict:
         reason = abstain_reason(state)
-        return {"answer": ABSTAIN_TEXT[reason], "citations": [], "insufficient": True, "abstain_reason": reason,
-                "trace": log(state, "abstain", reason=reason)}
+        # not_found 도 포함: 날짜 없는 이력 질문은 충분성이 0.2~0.55로 떨어져 평균 0.35 아래로 갈 때가 있다 (관련 이력이 있을 때만 뜬다)
+        dates = date_choices(state) if reason != "unknown" else []
+        return {"answer": ask_date_text(dates) if dates else ABSTAIN_TEXT[reason], "citations": [], "insufficient": True,
+                "abstain_reason": reason, "date_choices": dates,
+                "trace": log(state, "abstain", reason=reason, date_choices=len(dates))}
 
     def after_classify(state: State) -> str:
         return state["route"]
@@ -682,6 +688,55 @@ ABSTAIN_TEXT = {
                     "회사·문서·기간이나 조건을 좁혀 다시 질문해 주세요. 찾지 못했다는 것이 해당 규정이 없다는 뜻은 아닙니다.",
     "unknown": "근거를 판정하는 중 오류가 나서 답변을 보류했습니다. 잠시 후 다시 시도해 주세요.",
 }
+
+
+DATE_CHOICES_MAX = 6    # 날짜를 되물을 때 보여 줄 변경 수
+DATE_DETAIL_CHARS = 4000  # 펼쳐 보이는 변경 내용 (index.CHANGE_DOC_CHARS 와 같은 한도. 더 길면 공식 페이지에서)
+
+
+def date_choices(state: dict) -> list[dict]:
+    """날짜 없이 물은 이력 질문이 보류로 끝났을 때 보여 줄 관련 변경 [{id, date, path, clause, label, detail}] (최근 날짜부터).
+
+    날짜가 없으면 한 조항의 여러 해 치 변경을 놓고 무엇이 바뀌었는지 판단해야 해서 부족 판정이 많다
+    (2026-10-02 사용자 말투 이력 질문: 날짜가 빠진 12개 중 2개만 맞음).
+    고르면 화면이 그 변경 기록(detail: 이력 DB 의 전·후 내용)을 바로 펼친다. 다시 검색하지 않는다
+    (2026-10-06: 고른 변경으로 다시 물으면 22개 중 3개만 답이 됐고, "언제부터 생겼어?"처럼 흐름을 묻는 질문은 다시 보류됐다).
+    날짜는 관련 있다고 판정된 조항 이력(T)·변경 기록(H)에서만, 관련도가 높은 근거부터 DATE_CHOICES_MAX 개까지 모은다.
+    고를 변경이 둘 이상일 때만 되묻는다 (하나뿐이면 날짜 때문에 부족한 것이 아니다)."""
+    if any((state.get("question_meta") or {}).get("dates", {}).values()):
+        return []
+    res = state.get("res") or {}
+    timelines = {f"T:{t['path']}::{t['clause_id']}": t for t in res.get("timelines", [])}
+    changes = {"H:" + h["group"]: h for h in res.get("changes", [])}
+    per_item = []
+    for i in state.get("relevant", []):                    # 관련도 높은 순 (fit_context)
+        if i in timelines:
+            t = timelines[i]
+            per_item.append([(c, t["path"], t.get("doc_title")) for c in rag.timeline_shown(t["changes"])])
+        elif i in changes:
+            per_item.append([(changes[i], changes[i]["path"], changes[i].get("doc_title"))])
+    # 근거마다 하나씩 돌아가며 뽑는다: 긴 이력 하나가 자리를 다 차지하면 다른 관련 조항의 변경을 고를 수 없다
+    picked = {}
+    for c, path, title in (row[n] for n in range(max(map(len, per_item), default=0)) for row in per_item if n < len(row)):
+        date = c["version_date"]
+        clause = re.sub(r"#\d+$", "", c["clause_id"])       # 같은 번호 조항을 구별하는 내부 표시는 뺀다
+        # 날짜가 같아도 조항이 다르면 따로 둔다 (날짜로만 합치면 그날 바뀐 다른 조항을 보여 준다)
+        key = (date, path, clause)
+        if key in picked or len(picked) >= DATE_CHOICES_MAX:
+            continue
+        kind = I.CHANGE_KIND.get(c.get("change_type"), "변경")
+        text = c.get("change_text") or c.get("text") or ""   # 조항 이력은 DB 행, 변경 기록(H)은 검색 결과 (같은 change_text)
+        picked[key] = {"id": c.get("id") or c.get("group"), "date": date, "path": path, "clause": clause,
+                       "label": f"{date} · {rag._doc_name(path, title)} {clause} {kind}",
+                       "detail": clip(text.split("\n", 1)[-1], DATE_DETAIL_CHARS)}
+    # 최근 변경이 위로 (사람이 읽을 때는 가까운 날짜부터 보는 게 편하다)
+    return sorted(picked.values(), key=lambda c: c["date"], reverse=True) if len(picked) >= 2 else []
+
+
+def ask_date_text(choices: list[dict]) -> str:
+    """날짜를 되묻는 보류 안내 (LLM 없음). 변경 목록은 화면이 버튼으로 보여 주므로 본문에 되풀이하지 않는다."""
+    return ("관련 조항은 찾았지만 여러 번 바뀐 조항이라, 어느 변경을 물으신 건지 정하지 못해 답변을 보류했습니다.\n\n"
+            f"수집본에 기록된 관련 변경 {len(choices)}건입니다. 하나를 고르면 그 변경의 바뀌기 전·후 내용을 바로 보여 드려요.")
 
 
 NOT_FOUND_BELOW = 0.35  # 판정된 충분성 점수의 평균이 이보다 낮으면 "약관에서 찾지 못함"으로 안내 (안내 문구만 고른다)
@@ -740,7 +795,7 @@ LAYOUT = {   # 노드 -> (열, 행, 제목, 설명, 담당)
     "check_context": (1, 4, "문맥 충분성", "답변에 쓸 동일 문맥을 판정\n질문의 모든 조건을 해결하는가?", "jev"),
     "expand": (2, 4, "추가 검색", "새 검색어 + 후보 수 확대\n원래 회사·기간 조건 유지", "llm"),
     "answer": (1, 5, "답변", "충분성을 통과한 문맥으로\n인용 달아 답변", "llm"),
-    "abstain": (0, 4, "답변 보류", "2회 검색 후 부족 / 판정 실패\n추측 없이 안내 (LLM 호출 없음)", "rule"),
+    "abstain": (0, 4, "답변 보류", "2회 검색 후 부족 / 판정 실패 (LLM 없음)\n추측 없이 안내 · 이력은 변경 날짜 되묻기", "rule"),
     "__end__": (1, 6, "끝", "", "user"),
 }
 EDGE_LABELS = {"follow_up": "이어진 질문", "new": "새 질문","direct": "RAG 불필요", "clarify": "회사 불명", "rag": "RAG 필요", "sufficient": "충분", "insufficient": "부족 (최대 2회)",

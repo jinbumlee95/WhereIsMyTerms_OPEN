@@ -5,8 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>서비스 이용 안내 · WhereIsMyTerms</title>
   <link rel="stylesheet" href="app.css">
+  <script src="a11y.js"></script>
 </head>
 <body>
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
   <header class="topbar">
     <div class="brand">
       <span class="logo" aria-hidden="true">§</span>
@@ -21,7 +23,7 @@
     </div>
   </header>
 
-  <main class="doc">
+  <main id="main" class="doc" tabindex="-1">
     <h1>서비스 이용 안내</h1>
     <p class="lead">WhereIsMyTerms는 한국 온라인 서비스의 약관과 그 변경 이력을 찾아 근거와 함께 보여 주는 <strong>비영리 참고용</strong> 질의응답 서비스입니다.</p>
 
@@ -88,6 +90,7 @@
           서버는 이 쿠키를 읽거나 기록하지 않으며, 브라우저에서 쿠키를 지우면 사라집니다.</li>
         <li><strong>최근 대화 목록:</strong> 오른쪽의 대화 목록(질문·답변·근거)은 이 브라우저의 저장소(<code>localStorage</code>, <code>wimt_convs</code>)에만 최근 5개까지 저장됩니다.
           서버로 올라가지 않으며, 이어 갈 때 최근 3턴만 질문을 이해하는 데 쓰도록 함께 보냅니다. 목록의 ×나 브라우저 사이트 데이터 삭제로 지울 수 있습니다.</li>
+        <li><strong>화면 설정:</strong> 위쪽의 화면 밝기·색약 지원·스크린리더 지원 설정은 이 브라우저의 저장소(<code>localStorage</code>, <code>wimt_a11y</code>)에만 저장되며 서버는 읽지 않습니다.</li>
         <li><strong>개인정보 입력 자제:</strong> 이름, 연락처, 계정 정보, 주문 번호 같은 개인정보는 질문에 넣지 말아 주세요. 약관 내용을 묻는 데에는 필요하지 않습니다.</li>
       </ul>
     </section>

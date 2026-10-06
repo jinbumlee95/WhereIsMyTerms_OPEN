@@ -3,15 +3,37 @@
   --accent: #2f5bd3; --accent-soft: #e8eefc; --ok: #1f8a4c; --ok-soft: #e6f4ec; --warn: #b26a00; --warn-soft: #fdf2e0;
   --err: #c0362c; --err-soft: #fbeaea; --cite: #6a3fb5; --cite-soft: #efe8fb;
   --radius: 10px; --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .08);
+  --hl: #fff1a8; --hl-line: #f2d54a; --hl-text: #6b5800;
   color-scheme: light;
 }
+/* 어두운 화면: 기기 설정을 따르되(자동), 화면 설정(a11y.js)에서 밝게·어둡게를 고르면 그것을 따른다 */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #12151c; --panel: #1a1f29; --text: #e6e9ef; --muted: #98a2b3; --line: #2b3240;
     --accent: #7ea2ff; --accent-soft: #1f2a44; --ok: #5cc98a; --ok-soft: #173024; --warn: #f0b35a; --warn-soft: #33270f;
     --err: #ff7b72; --err-soft: #3a1a1a; --cite: #b99cff; --cite-soft: #2a2140; --shadow: none;
+    --hl: #5a4a0c; --hl-line: #8a7415; --hl-text: #f5e27a;
     color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+  --bg: #12151c; --panel: #1a1f29; --text: #e6e9ef; --muted: #98a2b3; --line: #2b3240;
+  --accent: #7ea2ff; --accent-soft: #1f2a44; --ok: #5cc98a; --ok-soft: #173024; --warn: #f0b35a; --warn-soft: #33270f;
+  --err: #ff7b72; --err-soft: #3a1a1a; --cite: #b99cff; --cite-soft: #2a2140; --shadow: none;
+  --hl: #5a4a0c; --hl-line: #8a7415; --hl-text: #f5e27a;
+  color-scheme: dark;
+}
+/* 색약 지원: 빨강·초록(적록 색각이상에서 구별이 어렵다) 대신 파랑·주황 (Okabe–Ito 계열). 색 말고도 밑줄·취소선·기호로 구분한다 */
+:root[data-cvd="on"] {
+  --ok: #0067a5; --ok-soft: #e1eef8; --err: #b34d00; --err-soft: #fcebdc; --warn: #7a6200; --warn-soft: #f8f1d4;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-cvd="on"]:not([data-theme="light"]) {
+    --ok: #6cbcf0; --ok-soft: #12283a; --err: #ffa05c; --err-soft: #3a2412; --warn: #f0e05a; --warn-soft: #302c0e;
+  }
+}
+:root[data-cvd="on"][data-theme="dark"] {
+  --ok: #6cbcf0; --ok-soft: #12283a; --err: #ffa05c; --err-soft: #3a2412; --warn: #f0e05a; --warn-soft: #302c0e;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -21,6 +43,21 @@ body {
 }
 button { font: inherit; cursor: pointer; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* 키보드 초점: 늘 보이게, 스크린리더 지원 모드에서는 더 굵게 */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+:root[data-sr="on"] :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; box-shadow: 0 0 0 6px var(--accent-soft); }
+.skip { position: absolute; left: 12px; top: -48px; z-index: 10; padding: 8px 14px; border-radius: 8px;
+        background: var(--accent); color: #fff; font-weight: 600; text-decoration: none; }
+.skip:focus { top: 8px; }
+/* 화면 설정 (이용 안내 옆) */
+.a11y { display: flex; flex-wrap: wrap; gap: 4px; }
+.a11y button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); font-size: 13px; }
+.a11y button:hover { color: var(--text); border-color: var(--accent); }
+.a11y button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.a11y button[aria-pressed="true"]::before { content: "✓ "; }
+/* 움직임 줄이기를 켠 기기에서는 등장 효과를 끈다 */
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
 .topbar { background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px 24px; }
 .brand { display: flex; gap: 12px; align-items: center; max-width: 1560px; margin: 0 auto; }
@@ -96,10 +133,8 @@ button { font: inherit; cursor: pointer; }
 .ev-group + .ev-group { margin-top: 20px; }
 .ev-note { margin: -4px 0 8px; font-size: 12px; color: var(--muted); }
 .ev.law .tag { background: var(--warn-soft); color: var(--warn); }
-.ev mark.hl { background: #fff1a8; color: inherit; border-radius: 3px; padding: 0 1px; box-shadow: 0 0 0 1px #f2d54a inset; }
-@media (prefers-color-scheme: dark) { .ev mark.hl { background: #5a4a0c; box-shadow: 0 0 0 1px #8a7415 inset; } }
-.ev .hl-count { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: #fff1a8; color: #6b5800; white-space: nowrap; flex: none; }
-@media (prefers-color-scheme: dark) { .ev .hl-count { background: #5a4a0c; color: #f5e27a; } }
+.ev mark.hl { background: var(--hl); color: inherit; border-radius: 3px; padding: 0 1px; box-shadow: 0 0 0 1px var(--hl-line) inset; }
+.ev .hl-count { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--hl); color: var(--hl-text); white-space: nowrap; flex: none; }
 /* 유불리 지수 칩 (Jev 참고 점수): 불리 기준(−0.7) 이하는 빨강, +0.5 이상은 초록, 그 사이는 회색 */
 .ev .favor, .ev .ftc-count { font-size: 11px; padding: 1px 6px; border-radius: 999px; white-space: nowrap; flex: none;
   font-variant-numeric: tabular-nums; cursor: help; }
@@ -153,15 +188,17 @@ button { font: inherit; cursor: pointer; }
 .step .step-time:empty { display: none; }
 .step.running { border-color: var(--accent); background: var(--accent-soft); }
 .step.running .icon { border-color: var(--accent); border-top-color: transparent; animation: spin .8s linear infinite; }
-.step.done .icon { background: var(--ok); border-color: var(--ok); color: #fff; }
-.step.error .icon { background: var(--err); border-color: var(--err); color: #fff; }
+.step.done .icon { background: var(--ok); border-color: var(--ok); color: var(--panel); }
+.step.error .icon { background: var(--err); border-color: var(--err); color: var(--panel); }
 .step.skipped { opacity: .45; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .step.running .icon { animation: none; } }
 
 /* 진행 중 근거: 검색·판정·법령 조회가 끝날 때마다 쌓인다 (최종 근거는 답변 아래) */
 .live { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }
-.live-head { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+.live-head { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; cursor: pointer; user-select: none; }
+.live-head:hover { color: var(--text); }
+.live:not([open]) .live-head { margin-bottom: 0; }
 .live-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 300px; overflow: auto; }
 .live-item { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 8px; align-items: baseline; padding: 6px 10px;
              border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 12px;
@@ -210,6 +247,16 @@ button { font: inherit; cursor: pointer; }
 .ev .sub { color: var(--muted); font-size: 12px; margin-left: auto; white-space: nowrap; }
 .ev pre { margin: 0; padding: 12px; border-top: 1px solid var(--line); white-space: pre-wrap; word-break: break-word;
           font: 13px/1.6 inherit; background: var(--bg); max-height: 420px; overflow: auto; }
+.date-list { margin-top: 12px; }
+.date-list .ev-note { margin: 0; }
+.cmp { border-top: 1px solid var(--line); padding: 10px 12px 12px; background: var(--bg); }
+.cmp-head { margin: 4px 0 6px; font-size: 13px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; }
+.cmp-note { margin: 4px 0 8px; font-size: 12px; color: var(--muted); }
+.cmp .legend { font-weight: 400; font-size: 12px; display: flex; gap: 8px; }
+.ev .cmp pre.diff { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); margin-bottom: 10px; }
+.diff del, .legend del { background: var(--err-soft); color: var(--err); text-decoration: line-through; border-radius: 3px; }
+.diff ins, .legend ins { background: var(--ok-soft); color: var(--ok); text-decoration: underline 2px; text-underline-offset: 3px; border-radius: 3px; font-weight: 600; }
+.diff .skip { display: block; margin: 4px 0; color: var(--muted); font-size: 12px; text-align: center; }
 .count { color: var(--muted); font-weight: 400; }
 .trace { margin-top: 12px; }
 .trace summary { cursor: pointer; color: var(--muted); font-size: 13px; }

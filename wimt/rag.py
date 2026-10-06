@@ -973,7 +973,9 @@ def _favor(score, scorer, old=None) -> dict:
     return out
 
 
-def context_blocks(res: dict) -> tuple[str, list[dict]]:
+def context_blocks(res: dict, newest_first: bool = False) -> tuple[str, list[dict]]:
+    """근거 블록과 인용 목록. newest_first: 조항 이력(T)·문서 개정 목록(D)을 최근 날짜부터 (화면 표시용.
+    최신본에서 거슬러 올라가며 보면 한 번에 확인할 변경이 적다). 답변·판정 문맥은 기본 순서(과거부터)를 쓴다."""
     blocks, cites = [], []
     for n, v in enumerate(res["clauses"], 1):
         tag = f"C{n}"
@@ -992,16 +994,17 @@ def context_blocks(res: dict) -> tuple[str, list[dict]]:
             span = f"{p.get('date_from') or '처음'}~{p.get('date_to') or '수집본'}"
             note += (f", 질문한 기간({span}) 해당 {len(t['changes'])}건" if t["date_matched"]
                      else f", 질문한 기간({span})에는 변경 없음 → 전체 표시")
-        lines = [f"[{tag}] {t['doc_title'] or t['path']} {t['clause_id']} {t['title']} — 변경 이력 ({note})"]
+        head = f"[{tag}] {t['doc_title'] or t['path']} {t['clause_id']} {t['title']} — 변경 이력 ({note})"
         shown = timeline_shown(t["changes"])
+        entries = []
         for c in shown:
             body = c["change_text"].split("\n", 1)[-1]
             eff = f", 시행 {c['effective_date']}" if c["effective_date"] and c["effective_date"] != c["version_date"] else ""
-            lines.append(f"· {c['version_date']} 개정 ({I.CHANGE_KIND[c['change_type']]}{eff}) [{c['clause_id']}]\n"
-                         + body[:TIMELINE_ITEM_CHARS])
+            entries.append(f"· {c['version_date']} 개정 ({I.CHANGE_KIND[c['change_type']]}{eff}) [{c['clause_id']}]\n"
+                           + body[:TIMELINE_ITEM_CHARS])
         if len(t["changes"]) > len(shown):
-            lines.insert(1 + TIMELINE_HEAD, f"(중간 변경 {len(t['changes']) - len(shown)}건 생략)")
-        blocks.append("\n".join(lines))
+            entries.insert(TIMELINE_HEAD, f"(중간 변경 {len(t['changes']) - len(shown)}건 생략)")
+        blocks.append("\n".join([head] + (entries[::-1] if newest_first else entries)))
         cites.append({"tag": tag, "path": t["path"], "clause_id": t["clause_id"],
                       "version_date": ", ".join(c["version_date"] for c in shown),
                       "doc": _doc_name(t["path"], t.get("doc_title"))})
@@ -1016,10 +1019,11 @@ def context_blocks(res: dict) -> tuple[str, list[dict]]:
         vs = d["versions"]
         lines = [f"[{tag}] {d['title'] or d['path']} ({d['path']}) 개정 이력: 버전 {len(vs)}개, "
                  f"최초 {d['first_version']}, 마지막 수집본 {d['latest_version']}"]
+        rows = []
         for x in vs[-DOC_VERSIONS_MAX:]:
             eff = f", 시행 {x['effective_date']}" if x["effective_date"] and x["effective_date"] != x["version_date"] else ""
-            lines.append(f"· {x['version_date']} ({'최초 수집' if x is vs[0] else '조항 ' + str(x['changed']) + '개 변경'}{eff})")
-        blocks.append("\n".join(lines))
+            rows.append(f"· {x['version_date']} ({'최초 수집' if x is vs[0] else '조항 ' + str(x['changed']) + '개 변경'}{eff})")
+        blocks.append("\n".join(lines + (rows[::-1] if newest_first else rows)))
         cites.append({"tag": tag, "path": d["path"], "clause_id": "", "version_date": d["latest_version"],
                       "doc": _doc_name(d["path"], d.get("title"))})
     for n, a in enumerate(res.get("laws", []), 1):

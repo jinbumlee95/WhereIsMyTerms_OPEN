@@ -463,6 +463,8 @@ def cmd_flow(args):
     if out.get("insufficient"):
         print({"not_found": "(약관에서 찾지 못함: 답변 보류)", "unknown": "(판정 오류: 답변 보류)"}
               .get(out.get("abstain_reason"), "(근거 부족: 답변 보류)"))
+    for c in out.get("date_choices", []):           # 관련 변경 (수집본 이력 DB 의 전·후 내용)
+        print(f"\n· {c['label']}\n" + "\n".join("  " + l for l in c["detail"].splitlines()[:8]))
     for c in out["citations"]:
         kind = f" {c['change_type']}" if "change_type" in c else ""
         print(f"[{c['tag']}] {c['path']} {c['clause_id']} ({c['version_date']}{kind})")
@@ -487,7 +489,8 @@ def cmd_web(args):
     links = ftc.Links(ftc.links_path(CACHE, args.strategy, args.model))
     print(f"공정위 유사 시정 사례: 조항 {len(links.links)}개에 연결" if links else
           "공정위 유사 시정 사례: 연결 파일이 없어 표시하지 않습니다 (python -m wimt ftc)")
-    app = web.WebApp(_load("current", args.strategy), make_app, DB(HISTORY_DB).documents(), links=links)
+    history = DB(HISTORY_DB)
+    app = web.WebApp(_load("current", args.strategy), make_app, history.documents(), links=links, db=history)
     app.warm()
     web.serve(app, port=args.port)
 

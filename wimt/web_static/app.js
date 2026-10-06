@@ -196,8 +196,12 @@ function detail(node, info, count) {
   }
 }
 
+// 스크린리더 안내 (a11y.js). 스크린리더 지원 모드면 단계마다, 아니면 결과처럼 중요한 것만
+const say = (text, opts) => window.wimtA11y?.announce(text, opts);
+
 function onStep(ev) {
   let node = ev.node;
+  if (ev.status === "running") say(`${ev.label} 중`);
   if (node === "direct_answer" || node === "clarify") {  // 즉시 답변·되묻기: 검색·판정은 건너뛴 것으로
     ["retrieve", "grade", "check_context"].forEach((n) => { const el = $(`step-${n}`); el.className = "step skipped"; el.querySelector(".detail").textContent = "건너뜀"; });
     $(`step-answer`).querySelector(".label").textContent = ev.label;
@@ -256,9 +260,20 @@ function renderResult(r, question) {
   $("understood").textContent = r.rewritten ? `이렇게 이해했어요: ${r.question}` : "";
   $("answer").innerHTML = renderAnswer(r.answer);
   const cited = new Set(r.citations.map((c) => c.tag));
-  $("notice").hidden = !r.insufficient;
+  const dates = r.date_choices || [];
+  $("notice").hidden = !r.insufficient || dates.length > 0;   // 날짜 되묻기는 답변 칸에 이유가 이미 있다
   $("notice").textContent = ABSTAIN[r.abstain_reason] || ABSTAIN.insufficient;
   $("choices").hidden = r.route !== "clarify";
+  // 날짜 없는 이력 질문: 관련 변경을 펼치면 이력 DB 의 전·후 내용을 바로 보여 준다 (다시 검색하지 않는다)
+  $("date-list").hidden = !dates.length;
+  $("date-list").innerHTML = !dates.length ? "" : `<p class="ev-note">수집본 기준 변경 기록입니다. ${esc(TERMS_SOURCE)}</p>`
+    + dates.map((c) => `<details class="ev" data-change="${esc(c.id || "")}"><summary><span class="head">${esc(c.label)}</span>${c.source_url
+      ? `<a class="source" href="${esc(c.source_url)}" target="_blank" rel="noopener" title="해당 기업의 공식 페이지 (정본)">원문 확인 ↗</a>` : ""}</summary>
+      <pre>${esc(c.detail || "")}</pre></details>`).join("");
+  // 처음 펼칠 때 비교 보기를 받아 바꾼다 (실패하면 위의 전·후 글을 그대로 둔다)
+  $("date-list").querySelectorAll("details[data-change]").forEach((d) => d.addEventListener("toggle", () => {
+    if (d.open && d.dataset.change && !d.dataset.loaded) { d.dataset.loaded = "1"; loadChange(d); }
+  }));
   if (r.route === "clarify") {                          // 되묻기: 회사를 고르면 같은 질문을 다시 보낸다
     $("choices").innerHTML = r.choices.map((c) => `<button type="button" data-id="${esc(c.id)}">${esc(c.name)}</button>`).join("")
       + `<button type="button" class="all" data-id="">전체 회사에서 찾기</button>`;
@@ -312,8 +327,10 @@ function renderResult(r, question) {
     <p class="ftc-note">${esc(FTC_NOTE)}</p>
     ${cases.map((c) => `<details class="ftc-case"><summary>${esc(c.date.slice(0, 7))} ${esc(c.target)}
       <span class="ftc-issue">${esc(c.issue)}</span><span class="sim">유사도 ${c.similarity.toFixed(2)}</span></summary>
-      <div class="ftc-pair"><div><b>시정 전</b><pre>${esc(c.before)}</pre></div>
-      <div><b>시정 후</b><pre>${esc(c.after || "(조항 삭제)")}</pre></div></div>
+      <div class="ftc-pair"><div><b>시정 전</b> <small class="legend"><del>시정으로 빠진 부분</del></small>
+        <pre class="diff">${c.before_ops ? diffHtml(c.before_ops) : esc(c.before)}</pre></div>
+      <div><b>시정 후</b> <small class="legend"><ins>고치거나 넣은 부분</ins></small>
+        <pre class="diff">${!c.after ? "(조항 삭제)" : c.after_ops ? diffHtml(c.after_ops) : esc(c.after)}</pre></div></div>
       <p class="ftc-meta">${esc([c.action, c.law.replace(/;/g, " ")].filter(Boolean).join(" · "))}
       <a href="${esc(c.url)}" target="_blank" rel="noopener">공정거래위원회 보도자료 ↗</a></p></details>`).join("")}</div>`;
   const terms = r.evidence.filter((e) => e.tag[0] !== "L");
@@ -381,6 +398,7 @@ let liveSeen = new Set();
 function resetLive() {
   liveSeen = new Set();
   $("live").hidden = true;
+  $("live").open = true;
   $("live-list").innerHTML = "";
   $("live-title").textContent = "찾은 근거";
 }
@@ -406,6 +424,45 @@ function onLive(ev) {
   $("live-count").textContent = judged ? `${items.length}건 중 관련 ${kept}건` : `${items.length}건`;
   $("live-title").textContent = ev.node === "laws" ? "찾은 근거 · 법령 조회 반영" : ev.node === "expand" ? "찾은 근거 · 추가 검색 반영" : "찾은 근거";
   $("live").hidden = false;
+}
+
+// 결과가 나오면 진행 중 목록을 한 줄로 접는다 (펼쳐 볼 수 있다). 답변이 목록에 밀려 안 보이는 일이 없게.
+function foldLive(r) {
+  if ($("live").hidden) return;
+  $("live").open = false;
+  $("live-title").textContent = !(r.evidence || []).length ? "찾아본 근거 · 관련 있는 근거 없음"
+    : r.abstain_reason ? "찾은 근거 · 답하기에 부족해 보류" : "찾은 근거 · 답변에 쓴 근거는 아래에";
+}
+
+// ------------------------------------------------------------------ 변경 비교 보기 (빠진 부분·들어간 부분 표시)
+// 이력 DB 의 기록으로 서버가 계산한 차이다. 수집본끼리의 비교이며, 정본은 회사 공식 페이지다
+function diffHtml(ops) {
+  // 스크린리더는 del·ins 를 보통 읽지 않으므로 보이지 않는 표시를 붙인다
+  return ops.map(([kind, text]) => kind === "del" ? `<del><span class="sr-only">[빠짐] </span>${esc(text)}<span class="sr-only"> [빠짐 끝]</span></del>`
+    : kind === "ins" ? `<ins><span class="sr-only">[들어감] </span>${esc(text)}<span class="sr-only"> [들어감 끝]</span></ins>`
+    : kind === "skip" ? `<span class="skip">… 같은 내용 ${Number(text).toLocaleString()}자 생략 …</span>`
+    : kind === "cut" ? `<span class="skip">… 이하 ${Number(text).toLocaleString()}자는 원문에서 확인해 주세요 …</span>`
+    : esc(text)).join("");
+}
+
+async function loadChange(d) {
+  try {
+    const res = await fetch(`/api/change?id=${encodeURIComponent(d.dataset.change)}`);
+    if (!res.ok) return;
+    const v = await res.json();
+    const kind = CHANGE[v.change_type] || v.change_type;
+    const latest = v.change_type === "removed" ? `<p class="cmp-note">이 변경으로 조항이 삭제되었습니다.</p>`
+      : !v.latest ? `<p class="cmp-note">마지막 수집본에서 이 조항을 찾지 못했습니다 (이후 삭제되었거나 다른 조항과 합쳐졌을 수 있습니다).</p>`
+      : v.latest.same ? `<p class="cmp-note">마지막 수집본(${esc(v.latest.version_date)}, ${esc(v.latest.clause_id)})까지 이 조항은 더 바뀌지 않았습니다.</p>`
+      : `<pre class="diff">${diffHtml(v.latest.diff)}</pre>`;
+    d.querySelector("pre").outerHTML = `<div class="cmp">
+      <p class="cmp-head">${esc(v.version_date)} ${esc(kind)}: 바뀌기 전 → 후
+        <span class="legend"><del>빠진 부분</del><ins>들어간 부분</ins></span></p>
+      <pre class="diff">${diffHtml(v.change)}</pre>
+      ${v.change_type === "removed" ? "" : `<p class="cmp-head">이 변경 뒤 → 마지막 수집본${v.latest ? ` (${esc(v.latest.version_date)}, ${esc(v.latest.clause_id)})` : ""}</p>`}
+      ${latest}
+      <p class="cmp-note">수집본끼리 비교한 것입니다. ${esc(TERMS_SOURCE)}</p></div>`;
+  } catch { /* 네트워크 오류: 원래 글을 그대로 둔다 */ }
 }
 
 // ------------------------------------------------------------------ 질문 보내기 (SSE)
@@ -448,7 +505,11 @@ async function ask(question, { allCompanies = false } = {}) {
           stopTimer(ev.elapsed_ms, true);
           ok = true;
           renderResult(ev, question); addTurn(ev);
-          if ((ev.evidence || []).length) $("live").hidden = true;   // 최종 근거가 답변 아래에 뜨면 진행 중 목록은 접는다
+          say(ev.route === "clarify" ? "어느 회사인지 골라 주세요."
+            : (ev.date_choices || []).length ? `답변을 보류했습니다. 관련 변경 ${ev.date_choices.length}건을 펼쳐 볼 수 있습니다.`
+            : ev.insufficient ? "답변을 보류했습니다." : `답변이 준비되었습니다. 근거 ${ev.evidence.length}건.`, { always: true });
+          if (window.wimtA11y?.sr) $("result").focus();   // 스크린리더 지원: 답으로 초점을 옮겨 바로 읽게
+          foldLive(ev);
         }
         else if (ev.type === "error") throw new Error(ev.message);
       }

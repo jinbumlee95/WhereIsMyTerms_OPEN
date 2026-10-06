@@ -145,5 +145,26 @@ class Links:
             if c:
                 out.append({"similarity": sim, "date": c["date"], "release": c["release"], "target": c["target"],
                             "issue": c["issue"], "action": c["action"], "law": c["law"], "url": c["url"],
-                            "before": c["before"][:600], "after": c["after"][:600]})
+                            "before": c["before"][:CASE_CHARS], "after": c["after"][:CASE_CHARS],
+                            **sides(c["before"], c["after"])})
         return out
+
+
+CASE_CHARS = 600   # 화면에 보이는 시정 전·후 문구 길이
+
+
+def sides(before: str, after: str, limit: int = CASE_CHARS) -> dict:
+    """시정 전·후 칸에 그릴 차이 (화면 표시용). 전 칸: 같음 + 빠진 부분(del), 후 칸: 같음 + 바뀌거나 들어간 부분(ins).
+    잘린 글끼리 비교하면 자른 자리가 바뀐 곳처럼 보이므로 전체를 비교한 뒤 칸마다 limit 글자에서 자른다."""
+    from . import compare
+    ops = compare.diff(before or "", after or "")
+
+    def side(keep: str) -> list[list]:
+        out, used = [], 0
+        for kind, text in ops:
+            if kind not in ("eq", keep) or used >= limit:
+                continue
+            out.append([kind, text[:limit - used]])
+            used += len(out[-1][1])
+        return out
+    return {"before_ops": side("del"), "after_ops": side("ins")}

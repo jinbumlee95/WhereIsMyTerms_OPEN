@@ -16,9 +16,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
-from . import flow, rag
+from . import compare, flow, rag
 from . import services as S
 
 STATIC = Path(__file__).with_name("web_static")
@@ -57,7 +57,8 @@ def evidence(state: dict, sources: dict | None = None, links=None) -> list[dict]
     if not state.get("res"):
         return []
     sources = sources or {}
-    ctx, cites = rag.context_blocks(flow.keep_only(state["res"], set(state.get("relevant", []))))
+    # 화면에서는 이력을 최근 날짜부터 보여 준다 (답변 LLM 에 넘긴 문맥과 순서만 다르고 내용·번호는 같다)
+    ctx, cites = rag.context_blocks(flow.keep_only(state["res"], set(state.get("relevant", []))), newest_first=True)
     blocks = ctx.split("\n\n---\n\n") if ctx else []
     items = [{**c, "text": b.split("\n", 1)[-1] if "\n" in b else "", "head": b.split("\n", 1)[0],
               "source_url": c.get("source_url") or (sources.get(c["path"]) or {}).get("source_url") or ""}
@@ -137,7 +138,10 @@ def live_evidence(state: dict) -> list[dict]:
     grades, kept = state.get("grades") or {}, set(state.get("relevant") or [])
     out = []
     for e in flow.evidence(state["res"]):
-        body = e["text"].split("\n", 1)[-1] if "\n" in e["text"] else e["text"]
+        text = e["text"]
+        if e["id"][0] in "TD":                     # 이력은 최근 날짜부터 미리 보인다 (최종 근거 카드와 같은 순서)
+            text, _ = rag.context_blocks(flow.keep_only(state["res"], {e["id"]}), newest_first=True)
+        body = text.split("\n", 1)[-1] if "\n" in text else text
         g = grades.get(e["id"])
         out.append({"id": e["id"], "kind": e["id"][0],
                     "label": " · ".join(x for x in (e["document"], e["clause"], e["title"]) if x),
@@ -156,14 +160,16 @@ QUEUE = WORKERS * 2                                        # 처리 중인 질�
 
 class WebApp:
     def __init__(self, clauses: list[dict], make_app, documents: list[dict] | None = None,
-                 workers: int = WORKERS, queue: int = QUEUE, links=None):
+                 workers: int = WORKERS, queue: int = QUEUE, links=None, db=None):
         """make_app() -> 컴파일된 흐름. 한 번만 만들어 모든 작업 스레드가 함께 쓴다 (검색기는 읽기 전용,
         SQLite 는 스레드 공유 연결, 로컬 임베딩 모델과 법령 캐시는 각자 잠금으로 보호한다).
         동시에 workers 개를 처리하고 queue 개까지 기다리게 하며, 그보다 많으면 거절한다.
         documents: 이력 DB 의 문서 목록 (원문 주소 source_url, 최근 개정일 latest_version).
-        links: ftc.Links (조항 -> 문구가 비슷한 공정위 시정 사례). 시작할 때 한 번 읽고 바꾸지 않는다."""
+        links: ftc.Links (조항 -> 문구가 비슷한 공정위 시정 사례). 시작할 때 한 번 읽고 바꾸지 않는다.
+        db: 이력 DB (변경 비교 보기 /api/change. 없으면 그 API 는 404)."""
         self.sources = {d["path"]: d for d in documents or []}
         self.links = links
+        self.db = db
         self.companies = companies(clauses, self.sources)
         self.allowed = {c["id"] for c in self.companies}
         self.make_app, self.app = make_app, None
@@ -243,6 +249,9 @@ class WebApp:
                             live_due = ev["name"]
                 events.put({"type": "result", "answer": final.get("answer", ""), "citations": final.get("citations", []),
                             "evidence": evidence(final, self.sources, self.links), "route": final.get("route"), "choices": final.get("choices", []),
+                            # 날짜 없는 이력 질문: 관련 변경 (화면이 펼쳐 보인다). 정본 링크를 붙인다
+                            "date_choices": [{**c, "source_url": (self.sources.get(c["path"]) or {}).get("source_url") or ""}
+                                             for c in final.get("date_choices", [])],
                             "suggestions": final.get("suggestions", []),
                             # 추천 질문마다 가리키는 회사 (하나일 때만). 누르면 화면이 그 회사로 바꿔 묻는다
                             "suggestion_companies": [S.single_company(q) for q in final.get("suggestions", [])],
@@ -287,6 +296,12 @@ def make_handler(web: WebApp):
             path = urlsplit(self.path).path
             if path == "/api/companies":
                 return self.json(200, web.companies)
+            if path == "/api/change":                # 변경 하나의 전·후와 마지막 수집본 비교 (화면 하이라이트용, 읽기 전용)
+                cid = (parse_qs(urlsplit(self.path).query).get("id") or [""])[0]
+                got = compare.change_view(web.db, cid) if web.db is not None and 0 < len(cid) <= 500 else None
+                if not got:
+                    return self.json(404, {"error": "변경 기록을 찾지 못했습니다."})
+                return self.json(200, {**got, "source_url": (web.sources.get(got["path"]) or {}).get("source_url") or ""})
             name = PAGES.get(path, path.lstrip("/"))
             f = (STATIC / name).resolve()
             if STATIC.resolve() not in f.parents or not f.is_file():

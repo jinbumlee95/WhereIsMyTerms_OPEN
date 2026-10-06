@@ -124,6 +124,17 @@ class DB:
         rows = self._all("SELECT * FROM documents WHERE path = ?", (path,))
         return rows[0] if rows else None
 
+    def change(self, change_id: str) -> dict | None:
+        rows = self._all("SELECT * FROM changes WHERE id = ?", (change_id,))
+        return rows[0] if rows else None
+
+    def latest_clause(self, path: str, lineage: str | None) -> dict | None:
+        """마지막 수집본에서 같은 계보의 조항 (번호가 바뀌었어도 이어진 조항). 없으면(삭제됐거나 계보가 끊김) None."""
+        if not lineage:
+            return None
+        rows = self._all("SELECT * FROM clauses WHERE path = ? AND lineage = ? ORDER BY id LIMIT 1", (path, lineage))
+        return rows[0] if rows else None
+
     def lineage_of(self, path: str, clause_id: str) -> str | None:
         row = self._one("SELECT lineage FROM clauses WHERE path = ? AND clause_id = ?", (path, clause_id))
         return row[0] if row else None

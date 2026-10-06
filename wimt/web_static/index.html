@@ -5,8 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>약관 질의응답 · WhereIsMyTerms</title>
   <link rel="stylesheet" href="app.css">
+  <script src="a11y.js"></script>
 </head>
 <body>
+  <a class="skip" href="#question">질문 입력으로 건너뛰기</a>
   <header class="topbar">
     <div class="brand">
       <span class="logo" aria-hidden="true">§</span>
@@ -54,26 +56,27 @@
         </div>
       </form>
 
-      <section id="progress" class="card progress" hidden>
+      <section id="progress" class="card progress" aria-label="처리 진행" hidden>
         <div class="progress-head">
           <span id="progress-title" class="progress-title">처리 중</span>
           <span id="timer" class="timer" aria-live="off">0.0초</span>
         </div>
         <ol id="steps" class="steps"></ol>
-        <div id="live" class="live" hidden>
-          <div class="live-head"><span id="live-title">찾은 근거</span> <span id="live-count" class="count"></span></div>
+        <details id="live" class="live" open hidden>
+          <summary class="live-head"><span id="live-title">찾은 근거</span> <span id="live-count" class="count"></span></summary>
           <ol id="live-list" class="live-list"></ol>
-        </div>
+        </details>
         <p id="status" class="status" hidden></p>
       </section>
 
-      <section id="error" class="card error" hidden></section>
+      <section id="error" class="card error" role="alert" hidden></section>
 
-      <section id="result" class="card result" hidden>
+      <section id="result" class="card result" tabindex="-1" aria-label="답변" hidden>
         <p id="understood" class="understood" hidden></p>
         <div id="notice" class="notice" hidden></div>
         <div id="answer" class="answer"></div>
         <div id="choices" class="choices" hidden></div>
+        <div id="date-list" class="evidence date-list" hidden></div>
         <div id="suggest" class="suggest" hidden>
           <span class="suggest-label">이어서 물어보기 <small>(새 질문으로 처리됩니다)</small></span>
           <div id="suggest-list" class="choices"></div>
