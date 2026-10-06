@@ -216,6 +216,14 @@ button { font: inherit; cursor: pointer; }
 .live-item.dropped { opacity: .5; }
 @media (prefers-reduced-motion: reduce) { .live-item.new { animation: none; } .live-item { transition: none; } }
 
+/* 저장된 대화 열기 (app.js openConv): 바꾸기 전 살짝 흐리게, 답변은 단어 단위로 흘러나오듯, 아래 구역은 차례로 */
+.result, .evidence-wrap { transition: opacity .12s ease-out; }
+.leaving { opacity: .2; }
+.sw { animation: sw-in .3s ease-out both; }
+@keyframes sw-in { from { opacity: 0; } to { opacity: 1; } }
+.rise { animation: live-in .4s ease-out both; }
+@media (prefers-reduced-motion: reduce) { .sw, .rise { animation: none; } .result, .evidence-wrap { transition: none; } }
+
 .error { border-color: var(--err); background: var(--err-soft); color: var(--err); }
 .notice { padding: 10px 12px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); margin-bottom: 12px; font-size: 14px; }
 .answer p { margin: 0 0 10px; }

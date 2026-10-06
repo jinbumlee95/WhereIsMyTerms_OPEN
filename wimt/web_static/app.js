@@ -469,6 +469,7 @@ async function loadChange(d) {
 async function ask(question, { allCompanies = false } = {}) {
   $("question").value = question;
   $("submit").disabled = true;
+  settle();                                         // 대화 열기 효과가 도는 중이면 멈춘다
   $("error").hidden = true;
   $("result").hidden = true;
   $("evidence-wrap").hidden = true;
@@ -590,13 +591,88 @@ function openConv(id) {
   if (company !== conv.company) selectCompany(conv.company, { keepConv: true });
   $("progress").hidden = true;
   $("error").hidden = true;
-  const last = conv.turns[conv.turns.length - 1];
-  renderResult({ trace: null, ...last.result }, last.question);
   renderThread();
   renderConvs();
   $("question").value = "";
   $("question").focus();
+  const last = conv.turns[conv.turns.length - 1];
+  const turn = ++opening;
+  const show = () => {
+    if (turn !== opening) return;                     // 그새 다른 대화를 눌렀다
+    renderResult({ trace: null, ...last.result }, last.question);
+    LEAVING.forEach((k) => $(k).classList.remove("leaving"));
+    if (!calm()) reveal(streamIn($("answer")));
+  };
+  if (calm() || $("result").hidden) return show();
+  LEAVING.forEach((k) => $(k).classList.add("leaving"));   // 지금 답을 살짝 흐린 뒤 바꾼다
+  setTimeout(show, LEAVE_MS);
 }
+
+// 저장된 대화를 열 때의 표시 효과: 답변은 단어 단위로 흘러나오듯, 나머지 구역은 그 뒤에 차례로 떠오른다.
+// 내용은 처음부터 DOM 에 다 있고 보이는 시점만 늦춘다. 스크린리더 모드·동작 줄이기 설정이면 효과 없이 바로 보인다
+const LEAVE_MS = 120;           // 바꾸기 전에 흐리게 하는 시간
+const STREAM_MS = 900;          // 답변이 다 흘러나오는 최대 시간 (긴 답도 이 안에)
+const STREAM_STEP = 22;         // 단어 사이 최대 간격 ms
+const LEAVING = ["result", "evidence-wrap"];
+const RISE = ["understood", "notice", "choices", "date-list", "suggest", "meta", "evidence-wrap"];
+let opening = 0;
+const calm = () => document.documentElement.dataset.sr === "on" || matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// box 의 글자를 단어마다 <span class="sw"> 로 감싸 차례로 나타나게 한다. 인용 버튼은 통째로 한 단어로 (이벤트는 그대로).
+// 다 나오는 데 걸리는 ms 를 돌려준다
+function streamIn(box) {
+  const units = [];
+  const walk = document.createTreeWalker(box, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+    acceptNode: (n) => n.nodeType === 1 && n.classList.contains("cite") ? NodeFilter.FILTER_ACCEPT
+      : n.nodeType === 1 && n.closest(".cite") ? NodeFilter.FILTER_REJECT
+      : n.nodeType === 3 && n.parentElement.closest(".cite") ? NodeFilter.FILTER_REJECT
+      : n.nodeType === 3 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP,
+  });
+  const found = [];
+  while (walk.nextNode()) found.push(walk.currentNode);
+  for (const n of found) {
+    if (n.nodeType === 1) { units.push(n); continue; }
+    const frag = document.createDocumentFragment();
+    for (const piece of n.textContent.split(/(\s+)/)) {
+      if (!piece) continue;
+      if (/^\s+$/.test(piece)) { frag.append(piece); continue; }
+      const s = document.createElement("span");
+      s.textContent = piece;
+      frag.append(s);
+      units.push(s);
+    }
+    n.replaceWith(frag);
+  }
+  const step = Math.min(STREAM_STEP, STREAM_MS / Math.max(units.length, 1));
+  units.forEach((u, i) => {
+    u.classList.add("sw");
+    u.style.animationDelay = `${Math.round(i * step)}ms`;
+    u.addEventListener("animationend", () => { u.classList.remove("sw"); u.style.animationDelay = ""; }, { once: true });
+  });
+  return units.length * step;
+}
+
+// 답변 아래 구역을 at ms 뒤부터 하나씩 떠오르게 한다
+function reveal(at) {
+  RISE.map($).filter((el) => !el.hidden).forEach((el, i) => {
+    el.classList.remove("rise");
+    void el.offsetWidth;                                // 같은 요소에서 애니메이션을 다시 시작한다
+    el.style.animationDelay = `${Math.round(at * 0.6 + i * 90)}ms`;
+    el.classList.add("rise");
+  });
+}
+
+// 효과를 멈추고 모두 바로 보이게 (새 질문을 보낼 때)
+function settle() {
+  opening++;
+  LEAVING.forEach((k) => $(k).classList.remove("leaving"));
+  RISE.forEach((k) => { $(k).classList.remove("rise"); $(k).style.animationDelay = ""; });
+}
+RISE.forEach((k) => $(k).addEventListener("animationend", (e) => {
+  if (e.target !== e.currentTarget) return;           // 안쪽 요소의 애니메이션은 무시
+  e.currentTarget.classList.remove("rise");
+  e.currentTarget.style.animationDelay = "";
+}));
 
 function deleteConv(id) {
   convs = convs.filter((c) => c.id !== id);
