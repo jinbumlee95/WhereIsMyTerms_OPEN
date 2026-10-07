@@ -33,8 +33,8 @@ def _words(a: str, b: str, ops: list):
             _push(ops, "ins", "".join(tb[j1:j2]))
 
 
-def diff(a: str, b: str) -> list[list]:
-    """a(전) -> b(후) 의 차이. 같은 부분은 접지 않은 원래 목록."""
+def diff(a: str, b: str, word_max: int = WORD_DIFF_MAX) -> list[list]:
+    """a(전) -> b(후) 의 차이. 같은 부분은 접지 않은 원래 목록. 바뀐 줄 묶음이 word_max 보다 길면 줄 단위로만."""
     la, lb = (a or "").splitlines(keepends=True), (b or "").splitlines(keepends=True)
     ops: list = []
     sm = difflib.SequenceMatcher(None, la, lb, autojunk=False)
@@ -42,7 +42,7 @@ def diff(a: str, b: str) -> list[list]:
         old, new = "".join(la[i1:i2]), "".join(lb[j1:j2])
         if tag == "equal":
             _push(ops, "eq", old)
-        elif tag == "replace" and len(old) + len(new) <= WORD_DIFF_MAX:
+        elif tag == "replace" and len(old) + len(new) <= word_max:
             _words(old, new, ops)
         else:
             _push(ops, "del", old)

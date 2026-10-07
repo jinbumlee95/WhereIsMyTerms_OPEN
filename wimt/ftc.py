@@ -16,6 +16,7 @@ import csv
 import hashlib
 import json
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from . import index as I
@@ -128,6 +129,29 @@ def link(db_dir: Path, cache_dir: Path, strategy: str, model: str,
     return {"clauses": len({m["group"] for m in pmeta}), "linked": len(links), "cases": len(used), "path": path}
 
 
+def correction_diff(before: str, after: str) -> dict:
+    """공백 차이는 무시하고 어절·문장부호의 변경 범위를 표시한다. 표시 문구는 원문을 보존한다."""
+    def tokenize(text):
+        matches = list(re.finditer(r"\w+|[^\w\s]", text))
+        # 토큰 앞의 공백도 해당 조각에 포함해 원래 줄바꿈과 띄어쓰기를 보존한다.
+        bounds = [0] + [m.start() for m in matches[1:]] + [len(text)]
+        return [m.group() for m in matches], bounds
+
+    a, ab = tokenize(before)
+    b, bb = tokenize(after)
+    left, right = [], []
+    for op, i, j, k, l in SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if i < j:
+            left.append({"text": before[ab[i]:ab[j]], "changed": op != "equal"})
+        if k < l:
+            right.append({"text": after[bb[k]:bb[l]], "changed": op != "equal"})
+    if not a and before:
+        left.append({"text": before, "changed": False})
+    if not b and after:
+        right.append({"text": after, "changed": False})
+    return {"before": left, "after": right}
+
+
 class Links:
     """화면용: 조항 group -> 비슷한 시정 사례 목록. 파일이 없으면 비어 있다."""
 
@@ -145,7 +169,8 @@ class Links:
             if c:
                 out.append({"similarity": sim, "date": c["date"], "release": c["release"], "target": c["target"],
                             "issue": c["issue"], "action": c["action"], "law": c["law"], "url": c["url"],
-                            "before": c["before"][:CASE_CHARS], "after": c["after"][:CASE_CHARS],
+                            "before": c["before"], "after": c["after"],
+                            "diff": correction_diff(c["before"], c["after"]),
                             **sides(c["before"], c["after"])})
         return out
 

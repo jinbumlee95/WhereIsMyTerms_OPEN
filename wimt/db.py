@@ -161,11 +161,19 @@ class DB:
     def documents(self) -> list[dict]:
         return self._all("SELECT * FROM documents ORDER BY path")
 
-    def changes_between(self, company: str | None = None, path: str | None = None, date_from: str | None = None,
+    def changes_between(self, company: str | list[str] | None = None, path: str | None = None, date_from: str | None = None,
                         date_to: str | None = None, limit: int = 50, month_day: str | None = None) -> list[dict]:
         """회사·문서·기간으로 변경 목록 (최신순). month_day("07-25" 또는 "07")는 연도와 상관없이 그 월(일)."""
         sql, args = "SELECT * FROM changes WHERE 1=1", []
-        for col, val, op in (("company", company, "="), ("path", path, "="), ("version_date", date_from, ">="),
+        # services.detect returns a list when a question names more than one company.
+        if isinstance(company, list):
+            if not company:
+                return []
+            sql += " AND company IN (" + ",".join("?" for _ in company) + ")"
+            args.extend(company)
+        elif company:
+            sql += " AND company = ?"; args.append(company)
+        for col, val, op in (("path", path, "="), ("version_date", date_from, ">="),
                              ("version_date", date_to, "<="), ("substr(version_date, 6)", month_day and month_day + "%", "LIKE")):
             if val:
                 sql += f" AND {col} {op} ?"; args.append(val)

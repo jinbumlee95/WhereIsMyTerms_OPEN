@@ -28,10 +28,13 @@ import random
 import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 
+from . import compare as C
 from . import index as I
 from . import laws as L
+from . import score as SC
 from . import services as S
 from .normalize import content_hash
 
@@ -439,6 +442,9 @@ class Retriever:
                 add_timeline(h, h.get("lineage") or None)
         hits_new = [h for h in hits if h["group"] not in seen]
         res["changes"] = hits_new if diverse else hits_new[:k_changes]     # 회사별로 모았으면 뒤 회사를 자르지 않는다
+        if self.db:
+            # 수정 기록을 전·후 비교(diff)로 보이려면 조항 전체의 전·후 본문이 필요하다 (색인 본문은 바뀐 항만 담는다)
+            res["changes"] = [{**h, "db_change": self.db.change(h["group"].split("#")[0])} for h in res["changes"]]
         if plan["intent"] == "doc_history" and self.db:
             named = self._named_doc(query, w)
             paths = list(dict.fromkeys(([named] if named else []) + [v["path"] for v in res["clauses"][:2]]
@@ -956,6 +962,8 @@ ANSWER_SYSTEM = """너는 한국 온라인 서비스 약관을 설명하는 도�
   "현재 버전은 …이다", "현행 약관은 …이다"처럼 단정하지 말고 "제가 알고 있는 버전(…)에서는"처럼 쓴다.
   버전 안내 문구("최신이 아닐 수 있다")는 답변 끝에 따로 붙으므로 직접 쓰지 않는다.
 - 날짜는 근거에 적힌 그대로 쓴다. 변경 이력을 말할 때는 개정일(과 시행일)을 밝힌다.
+- 변경 기록의 [-…-] 는 그 개정에서 빠진 글, {+…+} 는 새로 들어간 글이다. 표기 없는 글은 개정 전에도 있던 글이므로
+  그 개정에서 생겼다고 말하지 않는다. 답변에는 이 기호를 쓰지 않고 "…가 빠졌다", "…로 바뀌었다"처럼 풀어 쓴다.
 - 여러 서비스가 섞여 있으면 서비스별로 나눠 답한다.
 - 조항을 말할 때는 문서 이름을 함께 쓴다 (예: "쿠팡 이용약관 제7조"). 조 번호가 같아도 다른 문서의 조항은 섞지 않는다.
 - 쉬운 말로, 짧게 답한다. 사용자에게 불리할 수 있는 조건(환불 제한, 면책, 일방적 변경 등)이 있으면 분명히 짚는다.
@@ -996,12 +1004,13 @@ def context_blocks(res: dict, newest_first: bool = False) -> tuple[str, list[dic
                      else f", 질문한 기간({span})에는 변경 없음 → 전체 표시")
         head = f"[{tag}] {t['doc_title'] or t['path']} {t['clause_id']} {t['title']} — 변경 이력 ({note})"
         shown = timeline_shown(t["changes"])
+        if any(is_diff(c) for c in shown):
+            head += "\n" + DIFF_LEGEND
         entries = []
         for c in shown:
-            body = c["change_text"].split("\n", 1)[-1]
             eff = f", 시행 {c['effective_date']}" if c["effective_date"] and c["effective_date"] != c["version_date"] else ""
             entries.append(f"· {c['version_date']} 개정 ({I.CHANGE_KIND[c['change_type']]}{eff}) [{c['clause_id']}]\n"
-                           + body[:TIMELINE_ITEM_CHARS])
+                           + change_body(c, TIMELINE_ITEM_CHARS))
         if len(t["changes"]) > len(shown):
             entries.insert(TIMELINE_HEAD, f"(중간 변경 {len(t['changes']) - len(shown)}건 생략)")
         blocks.append("\n".join([head] + (entries[::-1] if newest_first else entries)))
@@ -1010,7 +1019,12 @@ def context_blocks(res: dict, newest_first: bool = False) -> tuple[str, list[dic
                       "doc": _doc_name(t["path"], t.get("doc_title"))})
     for n, v in enumerate(res["changes"], 1):
         tag = f"H{n}"
-        blocks.append(f"[{tag}] " + v["text"])
+        row = v.get("db_change")
+        if row and is_diff(row):
+            blocks.append(f"[{tag}] " + v["text"].split("\n", 1)[0] + "\n" + DIFF_LEGEND + "\n"
+                          + change_body(row, I.CHANGE_DOC_CHARS))
+        else:
+            blocks.append(f"[{tag}] " + v["text"])
         cites.append({"tag": tag, "path": v["path"], "clause_id": v["clause_id"], "version_date": v["version_date"],
                       "change_type": v["change_type"], "doc": _doc_name(v["path"], v.get("doc_title")),
                       **_favor(v.get("favor_score"), v.get("scorer"), v.get("old_score"))})
@@ -1087,8 +1101,51 @@ def timeline_shown(changes: list) -> list:
     if len(changes) <= TIMELINE_MAX:
         return list(changes)
     return list(changes[:TIMELINE_HEAD]) + list(changes[-(TIMELINE_MAX - TIMELINE_HEAD):])
-TIMELINE_ITEM_CHARS = 700
+# 변경 하나에 보일 최대 글자 수. 2026-10-07 까지는 700자에 전·후 전문을 그대로 넣어, 바뀐 곳이 700자 뒤면 보이지 않았다
+# (롤 운영정책 제1조 2015-06-08: "7일전" 이 925번째 글자). 비교(diff)로 보이면 대부분 짧아져 한도를 늘려도 문맥이 크게 늘지 않는다.
+TIMELINE_ITEM_CHARS = 1500
 DOC_VERSIONS_MAX = 30
+
+# 수정 기록을 전·후 전문 대신 비교로 보인다. 전문 둘을 주면 모델이 거의 같은 두 문장을 직접 비교하다 틀렸다
+# (토스 전자인증 제4조 2023-09-28: 남아 있는 "전자서명인증업무준칙"을 빠졌다고 답함). 추가·삭제 기록은 비교할 짝이 없어 본문 그대로.
+CHANGE_DIFF = True
+DIFF_CONTEXT = 60             # 바뀐 곳 앞뒤로 남기는 같은 글자 수
+DIFF_FOLD_MIN = 160           # 같은 구간이 이보다 길면 가운데를 줄인다
+DIFF_WORD_MAX = 4000          # 바뀐 줄 묶음이 이보다 길면 단어 단위 대신 줄 단위로 빠짐·들어감
+DIFF_LEGEND = "(비교 표기: [-…-] 이 개정에서 빠진 글, {+…+} 새로 들어간 글, (…n자 같음…) 바뀌지 않아 줄인 부분. 표기 없는 글은 개정 전후 그대로다)"
+
+
+DIFF_MAX_CHARS = 20_000       # 전·후 어느 쪽이든 이보다 긴 조항은 비교하지 않는다 (KT 제3자 제공처 목록 4만 자 등)
+
+
+def _lump(text: str) -> bool:
+    """비교할 가치가 적은 덩어리: 아주 긴 조항, 또는 긴 목록·표 (KT 수탁사 표, 제3자 제공 회사 목록).
+    비교에 10초 가까이 걸렸고, 비교해도 1,500자 안에 뜻 있는 문장이 남지 않는다."""
+    return len(text) > DIFF_MAX_CHARS or (len(text) > SC.LIST_SKIP_CHARS
+                                          and (SC.is_list(text) or SC.is_company_list(text)))
+
+
+def is_diff(row: dict) -> bool:
+    return (CHANGE_DIFF and row.get("change_type") == "modified" and bool(row.get("old_text"))
+            and not _lump(row["old_text"]) and not _lump(row["text"]))
+
+
+@lru_cache(maxsize=1024)
+def _diff_text(old: str, new: str) -> str:
+    # 한 질문에서 근거 문맥을 판정·문맥 맞추기마다 다시 만들므로 같은 전·후 쌍은 한 번만 비교한다.
+    # 단어 단위 비교는 바뀐 줄 묶음이 DIFF_WORD_MAX 이하일 때만 (KT 수탁사 표 조항은 단어 비교에 10초 가까이 걸렸다)
+    ops = C.fold(C.diff(old, new, word_max=DIFF_WORD_MAX), context=DIFF_CONTEXT, fold_min=DIFF_FOLD_MIN)
+    return "".join(t if k == "eq" else f"[-{t}-]" if k == "del" else f"{{+{t}+}}" if k == "ins"
+                   else f"(…{t}자 같음…)" for k, t in ops)
+
+
+def change_body(row: dict, limit: int) -> str:
+    """변경 기록 하나의 본문 (머리줄 제외). 수정이면 조항 전체 전·후의 비교, 아니면 저장된 변경 설명. limit 를 넘으면 자르고 밝힌다."""
+    if is_diff(row):
+        body = _diff_text(row["old_text"], row["text"])
+    else:
+        body = row["change_text"].split("\n", 1)[-1]
+    return body if len(body) <= limit else body[:limit] + f"\n…(이하 {len(body) - limit:,}자 생략)"
 
 
 def answer(question: str, retriever: Retriever, llm: LLM, rewrite: bool = True, route: bool = True, **search_kw) -> dict:

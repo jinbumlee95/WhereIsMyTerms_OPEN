@@ -323,14 +323,21 @@ function renderResult(r, question) {
       ${favor ? `<p class="favor-note"><strong>${esc(favorLine(e))}</strong><br>${esc(FAVOR_NOTE)}</p>` : ""}
       <pre>${marked(e.text, hl)}</pre>${ftc.length ? ftcBlock(ftc) : ""}</details>`;
   };
+  const ftcText = (c, side) => {
+    const parts = c.diff?.[side];
+    if (side === "after" && !c.after) return '<span class="ftc-deleted">(조항 삭제)</span>';
+    if (!parts) return c[`${side}_ops`] ? diffHtml(c[`${side}_ops`]) : esc(c[side]); // 이전에 저장한 대화도 그대로 표시
+    const tag = side === "before" ? "del" : "ins";
+    return diffHtml(parts.map((p) => [p.changed ? tag : "eq", p.text]));
+  };
   const ftcBlock = (cases) => `<div class="ftc"><p class="ftc-head">공정위 유사 시정 사례 ${cases.length}건</p>
     <p class="ftc-note">${esc(FTC_NOTE)}</p>
     ${cases.map((c) => `<details class="ftc-case"><summary>${esc(c.date.slice(0, 7))} ${esc(c.target)}
       <span class="ftc-issue">${esc(c.issue)}</span><span class="sim">유사도 ${c.similarity.toFixed(2)}</span></summary>
       <div class="ftc-pair"><div><b>시정 전</b> <small class="legend"><del>시정으로 빠진 부분</del></small>
-        <pre class="diff">${c.before_ops ? diffHtml(c.before_ops) : esc(c.before)}</pre></div>
+        <pre class="diff">${ftcText(c, "before")}</pre></div>
       <div><b>시정 후</b> <small class="legend"><ins>고치거나 넣은 부분</ins></small>
-        <pre class="diff">${!c.after ? "(조항 삭제)" : c.after_ops ? diffHtml(c.after_ops) : esc(c.after)}</pre></div></div>
+        <pre class="diff">${ftcText(c, "after")}</pre></div></div>
       <p class="ftc-meta">${esc([c.action, c.law.replace(/;/g, " ")].filter(Boolean).join(" · "))}
       <a href="${esc(c.url)}" target="_blank" rel="noopener">공정거래위원회 보도자료 ↗</a></p></details>`).join("")}</div>`;
   const terms = r.evidence.filter((e) => e.tag[0] !== "L");

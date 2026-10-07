@@ -199,6 +199,20 @@ def is_list(text: str) -> bool:
     return table or (len(lines) >= 15 and sum(map(len, lines)) / len(lines) <= 25)
 
 
+# 회사 이름으로 시작하는 줄: "(주)카카오뱅크 …", "㈜티빙 …", "BC카드㈜ …", "MVNO사업자 …"
+CORP_LINE = re.compile(r"^((\(주\)|㈜|\(유\)|\(재\)|\(사\)|주식회사 ?|유한회사 ?|재단법인 ?|사단법인 ?)[^\s|]+"
+                       r"|[^\s|]{1,30}(㈜|\(주\)|주식회사|유한회사|Inc\.?|Ltd\.?|LLC|Corporation|사업자|은행|카드|캐피탈|보험|증권|공사))(\s|$)")
+
+
+def is_company_list(text: str) -> bool:
+    """제공받는 회사·수탁사를 한 줄씩 나열한 목록 (표를 줄글로 풀어 쓴 것 포함). is_list 는 줄이 길면 놓친다:
+    KT 개인정보처리방침 제4조(제3자 제공)는 281줄·평균 144자라 짧은 줄 기준에 걸리지 않았다.
+    15줄 이상이고 30% 이상이 회사 이름으로 시작하면 목록. 2026-10-07 수집본 전체(과거 버전 포함)에서 걸리는 것은
+    KT 개인정보처리방침 제4·15·17조뿐이다."""
+    lines = [s.strip().lstrip("|").strip() for s in text.split("\n") if s.strip()]
+    return len(lines) >= 15 and sum(bool(CORP_LINE.match(s)) for s in lines) / len(lines) >= 0.3
+
+
 def skip_list(it: Item) -> bool:
     """채점하지 않을 항: LIST_SKIP_CHARS 보다 긴 목록."""
     return len(it.text) > LIST_SKIP_CHARS and is_list(it.text)
