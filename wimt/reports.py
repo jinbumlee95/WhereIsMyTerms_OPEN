@@ -1,5 +1,6 @@
 """산출물: 조항 통계표 · 변경 수동 검사표 · 유불리 라벨링 비교표."""
 import csv
+import difflib
 import random
 import statistics
 from pathlib import Path
@@ -89,7 +90,6 @@ def _review_row(r: dict, extra: dict | None = None) -> dict:
 
 def changed_words(old: str, new: str, limit: int = 4) -> str:
     """바뀐 부분만 짧게: '전' → '후' (검사할 때 어디가 바뀌었는지 바로 보이게)."""
-    import difflib
     a, b = old.split(), new.split()
     parts = []
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():

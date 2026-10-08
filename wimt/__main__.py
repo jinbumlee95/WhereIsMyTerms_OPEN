@@ -31,13 +31,37 @@ OpenAI 색인은 예상 토큰이 WIMT_EMBED_MAX_TOKENS (기본 200000) 를 넘�
 """
 import argparse
 import json
+import os
 import sys
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import pipeline, repo as R, reports
+import yaml
+
+from . import db, flow, ftc, pipeline, reports, ui, web
+from . import index as I
+from . import laws as L
+from . import repo as R
+from .db import DB
+from .diagnose import diagnose
 from .env import load_env
-from .index import ModelError, default_model
-from .score import make_scorer
+from .index import ModelError, default_model, make_embedder, search
+from .rag import (
+    LLM,
+    Retriever,
+    answer,
+    evaluate,
+    overlap,
+    qa_candidates,
+    qa_draft,
+    qa_history_candidates,
+    qa_history_draft,
+    qa_vague,
+)
+from .score import DISCLAIMER, make_scorer
+from .ui import SHEETS
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS, DATA, CACHE, CHROMA = ROOT / "reports", ROOT / "data", ROOT / ".cache", ROOT / ".chroma"
@@ -56,7 +80,6 @@ def _select(args) -> list[str]:
 
 
 def cmd_registry(args):
-    import yaml
     cards = [R.data_card(p, args.repo) for p in _select(args)]
     DATA.mkdir(exist_ok=True)
     (DATA / "sources.yaml").write_text(yaml.safe_dump(cards, allow_unicode=True, sort_keys=False), encoding="utf-8")
@@ -64,7 +87,6 @@ def cmd_registry(args):
 
 
 def cmd_diagnose(args):
-    from .diagnose import diagnose
     sources = []
     for p in _select(args):
         v = R.history(p, args.repo)[-1]
@@ -109,7 +131,6 @@ def cmd_scan(args):
 
 
 def _write_alerts(alerts: list[dict], path: Path):
-    from .score import DISCLAIMER
     lines = ["# 불리해진 조항", "", f"> {DISCLAIMER}", "",
              f"총 {len(alerts)}건. 채점기: {alerts[0]['scorer'] if alerts else '-'}", ""]
     for r in sorted(alerts, key=lambda r: r["version_date"], reverse=True):
@@ -154,7 +175,6 @@ def cmd_search(args):
         print(f"{r['favor_score']:+.2f}  {r['path']}  {r['clause_id']}  ({r.get('version_date', '')})")
         print("       " + r["text"].replace("\n", " ")[:140])
     print(f"총 {len(rows)}건" + (f" (상위 {args.limit}건 표시)" if len(rows) > args.limit else ""))
-    from .score import DISCLAIMER
     print(f"※ {DISCLAIMER}")
 
 
@@ -167,7 +187,6 @@ def _guard(path: Path, col: str, force: bool):
 
 
 def cmd_review(args):
-    from .ui import SHEETS
     for name in ("change", "drop"):
         _guard(REPORTS / SHEETS[name][0], SHEETS[name][1], args.force)
     records = _load("records", args.strategy)
@@ -179,7 +198,6 @@ def cmd_review(args):
 
 
 def cmd_label_sheet(args):
-    from .ui import SHEETS
     _guard(REPORTS / SHEETS["label"][0], SHEETS["label"][1], args.force)
     rows = reports.labeling_sheet(_load("current", args.strategy), n=args.n)
     print(f"항 {len(rows)}개 -> {reports.write_csv(REPORTS / 'labeling_sheet.csv', rows)}")
@@ -198,16 +216,13 @@ def cmd_label_compare(args):
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
-
-
 def cmd_ui(args):
-    from .ui import App, serve
     builders = {
         "change": lambda: reports.change_review(_load("records", args.strategy)),
         "drop": lambda: reports.drop_review(_load("records", args.strategy)),
         "label": lambda: reports.labeling_sheet(_load("current", args.strategy)),
     }
-    serve(App(REPORTS, builders, lambda scorer: _label_compare(REPORTS / "labeling_sheet.csv", scorer)),
+    ui.serve(ui.App(REPORTS, builders, lambda scorer: _label_compare(REPORTS / "labeling_sheet.csv", scorer)),
           port=args.port)
 
 
@@ -227,7 +242,6 @@ def cmd_eval(args):
 
 
 def cmd_index(args):
-    from . import index as I
     clauses, records = _load("current", args.strategy), _load("records", args.strategy)
     I.check_model(args.model)
     # 비용 확인: 임베딩하기 전에 새로 임베딩할 조각의 예상 토큰을 보고, 한도를 넘으면 멈춘다
@@ -252,7 +266,6 @@ def cmd_index(args):
 
 def _ftc_link(args, emb=None):
     """공정위 시정 사례를 색인하고 조항마다 문구가 비슷한 사례를 연결한다. 사례 파일이 없으면 건너뛴다."""
-    from . import ftc, index as I
     if not ftc.available():
         print(f"공정위 시정 사례: {ftc.PAIRS} 또는 {ftc.CASES_CSV} 가 없어 건너뜁니다 (tools/ftc_eval.py extract)")
         return
@@ -268,21 +281,18 @@ def _ftc_link(args, emb=None):
 
 
 def cmd_ftc(args):
-    from . import index as I
     I.check_model(args.model)
     _check_embeddings(args, kinds=("clauses",))
     _ftc_link(args)
 
 
 def cmd_db(args):
-    from . import db
     stats = db.build(HISTORY_DB, _load("records", args.strategy), _load("current", args.strategy))
     print(f"변경 이력 DB: 문서 {stats['documents']}, 버전 {stats['versions']}, 조항 변경 {stats['changes']}, "
           f"항 변경 {stats['unit_changes']}, 최신 조항 {stats['clauses']} -> {HISTORY_DB}")
 
 
 def cmd_timeline(args):
-    from .db import DB
     rows = DB(HISTORY_DB).timeline(args.path, args.clause)
     for c in rows:
         print(c["change_text"][:args.chars])
@@ -292,7 +302,6 @@ def cmd_timeline(args):
 
 def _check_embeddings(args, kinds=("clauses", "changes")):
     """검색 전 확인: 모델을 쓸 수 있고, 그 모델로 만든 색인이 지금 scan 결과와 맞는가. 아니면 ModelError."""
-    from . import index as I
     I.check_model(args.model)
     ids = {"clauses": lambda: I.vector_ids(I.entries(_load("current", args.strategy))),
            "changes": lambda: I.vector_ids(I.change_entries(_load("records", args.strategy)))}
@@ -302,9 +311,6 @@ def _check_embeddings(args, kinds=("clauses", "changes")):
 
 
 def _retriever(args):
-    from .index import make_embedder
-    from .rag import Retriever
-    from .db import DB
     _check_embeddings(args)
     if not HISTORY_DB.exists():
         cmd_db(args)
@@ -313,8 +319,6 @@ def _retriever(args):
 
 
 def cmd_qa_draft(args):
-    from .rag import LLM, qa_candidates, qa_draft
-    from .ui import SHEETS
     _guard(REPORTS / SHEETS["qa"][0], SHEETS["qa"][1], args.force)
     cands = qa_candidates(_load("current", args.strategy), _load("records", args.strategy), args.current, args.history)
     llm = LLM(args.llm)
@@ -326,9 +330,6 @@ def cmd_qa_draft(args):
 
 def cmd_qa_history(args):
     """이력 평가 질문 초안을 유형별로 만들어 평가 시트 뒤에 붙인다 (기존 판정은 그대로)."""
-    from .db import DB
-    from .rag import LLM, qa_history_candidates, qa_history_draft
-    from .ui import SHEETS
     path = REPORTS / SHEETS["qa"][0]
     rows = reports.read_csv(path) if path.exists() else []
     counts = {"dated": args.dated, "undated": args.undated, "deleted": args.deleted, "renumbered": args.renumbered,
@@ -349,8 +350,6 @@ def cmd_qa_history(args):
 
 def cmd_qa_vague(args):
     """채택된 질문마다 약관을 모르는 사용자 말투의 짝을 만들어 평가 시트 뒤에 붙인다."""
-    from .rag import LLM, overlap, qa_vague
-    from .ui import SHEETS
     path = REPORTS / SHEETS["qa"][0]
     rows = reports.read_csv(path)
     llm = LLM(args.llm)
@@ -366,9 +365,6 @@ def cmd_qa_vague(args):
 
 
 def cmd_rag_eval(args):
-    from .rag import evaluate
-    from .ui import SHEETS
-    from .rag import LLM
     llm = LLM(args.llm) if (args.rewrite or args.route) else None
     rows = [r for r in reports.read_csv(REPORTS / SHEETS["qa"][0])
             if args.variant == "all" or (r.get("variant") or "orig") == args.variant]
@@ -383,8 +379,7 @@ def cmd_rag_eval(args):
 
 def _laws(args):
     """법령 조회기 (legalize-kr). --no-laws 면 None (흐름은 법령 조회를 건너뛴다)."""
-    import os
-    from . import laws as L
+
     if getattr(args, "no_laws", False):
         return None
     if not os.environ.get("GITHUB_TOKEN"):
@@ -396,10 +391,7 @@ def _laws(args):
 def cmd_laws(args):
     """최신 조항이 인용한 법령 통계. --fetch 면 인용된 법령 파일(그 날짜에 시행 중인 판)을 미리 받아 캐시한다.
     --history 면 변경 기록의 버전 날짜 기준 판도 받는다 (날짜 지정 이력 질문이 빨라진다)."""
-    import time
-    from collections import Counter
-    from concurrent.futures import ThreadPoolExecutor
-    from . import laws as L
+
     counts, named = Counter(), Counter()
     wanted: set[tuple[str, str, str]] = set()          # (법령, 구분, 기준일)
     for c in _load("current", args.strategy):
@@ -447,8 +439,6 @@ def cmd_laws(args):
 
 
 def cmd_flow(args):
-    from . import flow
-    from .rag import LLM
     app = flow.build(_retriever(args), LLM(args.llm), flow.Judge(), mode=args.mode, laws=_laws(args))
     out = flow.run(app, args.question, args.service)
     print(out["answer"])
@@ -473,8 +463,6 @@ def cmd_flow(args):
 
 
 def cmd_web(args):
-    from . import flow, web
-    from .rag import LLM
     _check_embeddings(args)                       # 모델·색인 문제는 서버를 띄우기 전에 알린다
     judge = flow.Judge()                          # TYPESAFE_API_KEY 가 없으면 여기서 멈춘다
     laws = _laws(args)
@@ -482,10 +470,8 @@ def cmd_web(args):
     def make_app():                               # 작업 스레드 안에서 한 번 (임베딩 모델을 그 스레드에서 연다)
         return flow.build(_retriever(args), LLM(args.llm), judge, mode=args.mode, laws=laws)
 
-    from .db import DB
     if not HISTORY_DB.exists():
         cmd_db(args)
-    from . import ftc
     links = ftc.Links(ftc.links_path(CACHE, args.strategy, args.model))
     print(f"공정위 유사 시정 사례: 조항 {len(links.links)}개에 연결" if links else
           "공정위 유사 시정 사례: 연결 파일이 없어 표시하지 않습니다 (python -m wimt ftc)")
@@ -496,7 +482,6 @@ def cmd_web(args):
 
 
 def cmd_flow_diagram(args):
-    from . import flow
     app = flow.build(None, None, None)
     out = ROOT / "docs" / "rag-pipeline.png"
     flow.draw(app, out)
@@ -505,7 +490,6 @@ def cmd_flow_diagram(args):
 
 
 def cmd_answer(args):
-    from .rag import LLM, answer
     out = answer(args.question, _retriever(args), LLM(args.llm), rewrite=not args.no_rewrite, route=not args.no_route,
                  k=args.k, k_changes=args.k_changes, mode=args.mode, company=args.service,
                  auto_company=not args.no_service_filter)
@@ -524,7 +508,6 @@ def cmd_answer(args):
 
 
 def cmd_ask(args):
-    from .index import make_embedder, search
     _check_embeddings(args, kinds=("clauses",))
     rows = search(args.query, CHROMA, args.strategy, make_embedder(args.model), k=args.k, service=args.service,
                   doc_type=args.doc_type, unfavorable=args.unfavorable, with_refs=args.refs)
@@ -540,7 +523,6 @@ def cmd_ask(args):
     if not rows:
         print("결과 없음 (index 를 먼저 실행했는지, 필터가 너무 좁지 않은지 확인하세요)")
     else:
-        from .score import DISCLAIMER
         print(f"※ 두 번째 열은 유불리 지수. {DISCLAIMER}")
 
 

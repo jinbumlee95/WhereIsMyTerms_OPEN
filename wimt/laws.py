@@ -19,6 +19,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
+import httpx
+
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / ".cache" / "laws"
 CURRENT = "현행"               # as_of 가 없을 때 (현재 조항이 인용한 법령)
@@ -111,9 +113,7 @@ def extract(text: str, as_of: str = CURRENT, names: set[str] | None = None,
     for m in REF.finditer(text):
         head = text[max(0, m.start() - 80):m.start()] + m.group(1)
         tokens = head.split()
-        if tokens and tokens[-1] in ("법", "법률") and len(tokens) >= 2 and tokens[-2] in SAME_LAW:
-            name = last
-        elif tokens and tokens[-1] in ("동법", "같은법"):
+        if tokens and tokens[-1] in ("법", "법률") and len(tokens) >= 2 and tokens[-2] in SAME_LAW or tokens and tokens[-1] in ("동법", "같은법"):
             name = last
         else:
             name = law_name(tokens, names)
@@ -227,7 +227,6 @@ class GitHub:
     RAW = "https://raw.githubusercontent.com/" + REPO
 
     def __init__(self, token: str | None = None):
-        import httpx
 
         token = token or os.environ.get("GITHUB_TOKEN")
         headers = {"Accept": "application/vnd.github+json", **({"Authorization": f"Bearer {token}"} if token else {})}
@@ -249,7 +248,6 @@ class GitHub:
         return None if r is None else r.text
 
     def _get(self, url, params=None, allow_404=False):
-        import httpx
 
         try:
             r = self.http.get(url, params=params)

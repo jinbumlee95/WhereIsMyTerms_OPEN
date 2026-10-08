@@ -10,7 +10,7 @@ import re
 CONTEXT = 120          # 바뀐 곳 앞뒤로 남기는 같은 글자 수
 FOLD_MIN = 400         # 같은 구간이 이보다 길면 가운데를 접는다
 WORD_DIFF_MAX = 20_000 # 바뀐 줄 묶음이 이보다 길면 낱말 단위 비교 없이 통째로 빠짐·들어감
-TOKEN = re.compile(r"\s+|[가-힣]+|[A-Za-z]+|\d+|.", re.S)
+TOKEN = re.compile(r"\s+|[가-힣]+|[A-Za-z]+|\d+|.", re.DOTALL)
 
 
 def _push(ops: list, kind: str, text: str):

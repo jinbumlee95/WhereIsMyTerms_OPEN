@@ -19,6 +19,9 @@ import re
 from difflib import SequenceMatcher
 from pathlib import Path
 
+import numpy as np
+
+from . import compare
 from . import index as I
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,8 +89,7 @@ def build(db_dir: Path, embedder) -> dict:
     return I.upsert(entries(load_cases()), db_dir, collection(embedder.model), embedder)
 
 
-def _matrix(col) -> tuple[list[str], list[dict], "object"]:
-    import numpy as np
+def _matrix(col) -> tuple[list[str], list[dict], object]:
     got = col.get(include=["embeddings", "metadatas"])
     m = np.asarray(got["embeddings"], dtype=np.float32)
     m /= np.linalg.norm(m, axis=1, keepdims=True) + 1e-9
@@ -97,7 +99,6 @@ def _matrix(col) -> tuple[list[str], list[dict], "object"]:
 def link(db_dir: Path, cache_dir: Path, strategy: str, model: str,
          min_sim: float = LINK_MIN, top: int = LINK_TOP) -> dict:
     """조항(조 단위 group)마다 비슷한 시정 사례를 찾아 저장한다. 조각이 여러 개면 조각 중 가장 비슷한 값."""
-    import numpy as np
     cases = {c["id"]: c for c in load_cases()}
     cids, _, F = _matrix(I._collection(db_dir, collection(model), model))
     pids, pmeta, P = _matrix(I._collection(db_dir, I.collection_name("clauses", strategy, model), model))
@@ -181,7 +182,6 @@ CASE_CHARS = 600   # 화면에 보이는 시정 전·후 문구 길이
 def sides(before: str, after: str, limit: int = CASE_CHARS) -> dict:
     """시정 전·후 칸에 그릴 차이 (화면 표시용). 전 칸: 같음 + 빠진 부분(del), 후 칸: 같음 + 바뀌거나 들어간 부분(ins).
     잘린 글끼리 비교하면 자른 자리가 바뀐 곳처럼 보이므로 전체를 비교한 뒤 칸마다 limit 글자에서 자른다."""
-    from . import compare
     ops = compare.diff(before or "", after or "")
 
     def side(keep: str) -> list[list]:

@@ -14,12 +14,15 @@
   창마다 "n개 중 i번째"와 항의 머리말(첫 줄)을 붙여 앞뒤 관계를 알리고, 항 점수는 가장 불리한 창의 점수,
   Score.windows 에 창마다 [시작, 끝) 글자 위치와 점수를 남긴다. 창은 각자 캐시된다.
 """
+import itertools
 import json
 import math
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+import httpx
 
 from .normalize import content_hash, normalize
 
@@ -86,7 +89,6 @@ class JevScorer:
     window_chars = SNIPPET_CHARS   # 이보다 긴 항은 CachedScorer 가 창으로 나눠 보낸다 (build_state 가 앞부분만 보내므로)
 
     def __init__(self, api_key: str | None = None, model: str = JEV_MODEL):
-        import httpx  # 필요할 때만
 
         self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY")
         if not self.api_key:
@@ -292,7 +294,7 @@ def context_span(text: str, start: int, floor: int = 0) -> tuple[int, int] | Non
         if top and top[0] >= lo:
             return (top[0], min(top[1], top[0] + CTX_CHARS))   # 표 머리는 앞쪽(열 이름)을 남긴다
     cuts = [lo] + [m.end() for m in _BREAK.finditer(text, lo, start)] + [start]
-    segs = [(a, b) for a, b in zip(cuts, cuts[1:]) if text[a:b].strip()]
+    segs = [(a, b) for a, b in itertools.pairwise(cuts) if text[a:b].strip()]
     for a, b in reversed(segs):                     # 2) 목록을 여는 문장
         sp = _last_sentence(text, a, b)
         if sp and _OPENER.search(text[sp[0]:sp[1]]):

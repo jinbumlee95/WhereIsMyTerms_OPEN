@@ -15,12 +15,15 @@ Jev(typesafe.ai)는 판정 모델이라 글을 쓰지 않는다. 판정(분기·
 Jev 분기 실패는 RAG, 근거 판정 실패는 unknown으로 기록하고 답변을 보류한다.
 """
 import hashlib
+import itertools
 import json
 import math
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import TypedDict
+
+import httpx
 
 from . import index as I
 from . import laws as L
@@ -51,7 +54,6 @@ class Judge:
     지시·기준은 score.JevScorer 와 같은 영어 형식, state(질문·근거)는 한국어 원문 그대로."""
 
     def __init__(self, api_key: str | None = None, model: str = JEV_MODEL):
-        import httpx
 
         self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY")
         if not self.api_key:
@@ -318,7 +320,7 @@ class State(TypedDict, total=False):
     original_question: str       # 사용자가 실제로 쓴 질문
     history: list                # 직전 대화 [{question, answer, company}] (화면이 보낸다, 질문 이해에만 쓴다)
     rewritten: bool
-    company: str | None          # 도서관 UI 처럼 회사를 골라 둔 경우 (이 필터는 추가 검색에서도 풀지 않는다)
+    company: str | None          # 웹 UI 에서 회사를 골라 둔 경우 (이 필터는 추가 검색에서도 풀지 않는다)
     all_companies: bool          # 사용자가 "전체 회사에서 찾기"를 골랐다: 회사를 되묻지 않는다
     route: str                   # "direct" | "clarify" | "rag"
     route_prob: float
@@ -832,7 +834,6 @@ def edge_label(src: str, dst: str) -> str | None:
 
 def draw(app, path) -> None:
     """도식도 PNG. 그래프에 LAYOUT 에 없는 노드가 생기면 멈춘다 (그림이 코드와 어긋나지 않도록)."""
-    import math
 
     from PIL import Image, ImageDraw, ImageFont
 
@@ -869,7 +870,7 @@ def draw(app, path) -> None:
         d.text((x - tw / 2, y - 12), text, fill=color, font=f_edge)
 
     def line(pts, color, dashed):
-        for p, q in zip(pts, pts[1:]):
+        for p, q in itertools.pairwise(pts):
             if not dashed:
                 d.line([p, q], fill=color, width=3)
                 continue
@@ -921,7 +922,7 @@ def draw(app, path) -> None:
 
     # LangGraph 간선과 구별한 UI 재요청 연결 (서버 로직은 변경하지 않는다).
     cx0, cy0, cx1, _ = box("clarify")
-    ax0, ay0, ax1, _ = box("classify")
+    _ax0, ay0, ax1, _ = box("classify")
     ui_y = cy0 - 72
     ui_x = ax1 - 65
     line([((cx0 + cx1) / 2, cy0), ((cx0 + cx1) / 2, ui_y),

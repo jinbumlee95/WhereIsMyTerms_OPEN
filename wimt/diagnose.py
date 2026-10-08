@@ -13,6 +13,8 @@ import time
 import urllib.robotparser
 from urllib.parse import urlsplit
 
+import httpx
+
 from .normalize import normalize
 
 USER_AGENT = "WhereIsMyTerms-diagnose/0.1 (personal research; one request per page)"
@@ -63,7 +65,6 @@ def check(client, url: str, body: str, robots_cache: dict) -> dict:
 
 def diagnose(sources: list[dict], delay: float = 1.0) -> list[dict]:
     """sources: [{"url", "body", ...}] (같은 URL 은 한 번만)."""
-    import httpx
 
     rows, robots_cache, seen = [], {}, set()
     # br/zstd 는 추가 패키지 없이는 풀지 못해 요청하지 않는다 (DecodingError 를 '차단'으로 오판하지 않도록)

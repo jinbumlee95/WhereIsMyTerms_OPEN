@@ -4,8 +4,8 @@
 - POST /api/ask/stream: LangGraph 를 stream_mode=["tasks", "values"] 로 돌려, 노드가 시작·끝날 때마다
   SSE 이벤트를 보낸다 (Jev 판정처럼 몇 초 걸리는 단계도 "진행 중"으로 보인다). 마지막에 답변·인용·근거.
   검색·근거 판정·법령 조회·추가 검색이 끝날 때마다 그때까지 찾은 근거 목록(live)도 보내, 화면이 근거를 바로 쌓아 보인다.
-- 여러 사용자가 동시에 쓴다: 작업 스레드 WORKERS 개(WIMT_WEB_WORKERS, 기본 4)가 흐름 하나를 함께 쓰고,
-  넘치는 질문은 QUEUE 개까지 기다리게 한 뒤(화면에 '앞에 n개' 상태), 그보다 많으면 503 으로 거절한다.
+- 여러 사용자가 동시에 쓴다: 작업 스레드 WIMT_WEB_WORKERS 개(기본 4)가 흐름 하나를 함께 쓰고,
+  넘치는 질문은 그 두 배까지 기다리게 한 뒤(화면에 '앞에 n개' 상태), 그보다 많으면 503 으로 거절한다.
 """
 import json
 import logging
@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import compare, flow, rag
 from . import services as S
 
+log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("web_static")
 TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
@@ -78,7 +79,7 @@ HL_MIN = 0.3          # 답변 문장과 근거 문장의 글자 2-gram 겹침(D
 HL_PER_SENTENCE = 2   # 답변 문장 하나가 근거 하나에서 표시할 최대 문장 수
 TAG = re.compile(r"\[([CTHDL]\d+)\]")
 SPLIT_ANSWER = re.compile(r"(?<=[.!?。])\s+|\n+")
-SEGMENT = re.compile(r"[^\n]+?(?:[.!?。](?=\s|$)|$)", re.M)   # 근거 본문: 줄 안에서 문장 단위 (끝 문장부호 포함)
+SEGMENT = re.compile(r"[^\n]+?(?:[.!?。](?=\s|$)|$)", re.MULTILINE)   # 근거 본문: 줄 안에서 문장 단위 (끝 문장부호 포함)
 
 
 def _grams(text: str) -> set[str]:
@@ -154,16 +155,18 @@ def live_evidence(state: dict) -> list[dict]:
     return out
 
 
-WORKERS = int(os.environ.get("WIMT_WEB_WORKERS") or 4)   # 동시에 처리하는 질문 수 (여러 사용자)
-QUEUE = WORKERS * 2                                        # 처리 중인 질문 외에 기다릴 수 있는 질문 수
+def default_workers() -> int:
+    """동시에 처리하는 질문 수 (여러 사용자). import 때가 아니라 서버를 만들 때 읽어야 .env 값이 적용된다."""
+    return int(os.environ.get("WIMT_WEB_WORKERS") or 4)
 
 
 class WebApp:
     def __init__(self, clauses: list[dict], make_app, documents: list[dict] | None = None,
-                 workers: int = WORKERS, queue: int = QUEUE, links=None, db=None):
+                 workers: int | None = None, queue: int | None = None, links=None, db=None):
         """make_app() -> 컴파일된 흐름. 한 번만 만들어 모든 작업 스레드가 함께 쓴다 (검색기는 읽기 전용,
         SQLite 는 스레드 공유 연결, 로컬 임베딩 모델과 법령 캐시는 각자 잠금으로 보호한다).
-        동시에 workers 개를 처리하고 queue 개까지 기다리게 하며, 그보다 많으면 거절한다.
+        동시에 workers 개(기본 default_workers())를 처리하고 queue 개(기본 workers * 2)까지 기다리게 하며,
+        그보다 많으면 거절한다.
         documents: 이력 DB 의 문서 목록 (원문 주소 source_url, 최근 개정일 latest_version).
         links: ftc.Links (조항 -> 문구가 비슷한 공정위 시정 사례). 시작할 때 한 번 읽고 바꾸지 않는다.
         db: 이력 DB (변경 비교 보기 /api/change. 없으면 그 API 는 404)."""
@@ -173,6 +176,8 @@ class WebApp:
         self.companies = companies(clauses, self.sources)
         self.allowed = {c["id"] for c in self.companies}
         self.make_app, self.app = make_app, None
+        workers = workers or default_workers()
+        queue = workers * 2 if queue is None else queue
         self.workers = workers
         self.worker = ThreadPoolExecutor(max_workers=workers)
         self.slots = threading.BoundedSemaphore(workers + queue)
@@ -191,8 +196,8 @@ class WebApp:
         return self.worker.submit(self.flow_app)
 
     def check(self, body) -> tuple[str, str | None, bool]:
-        if not isinstance(body, dict):
-            raise ValueError("요청 형식을 확인해 주세요.")
+        if not isinstance(body, dict):      # 요청 검증 실패는 모두 ValueError -> 400 으로 돌려준다
+            raise ValueError("요청 형식을 확인해 주세요.")  # noqa: TRY004
         question, company = body.get("question"), body.get("company") or None
         if not isinstance(question, str) or not 1 <= len(question.strip()) <= 2000:
             raise ValueError("질문을 1~2,000자로 적어 주세요.")
@@ -261,7 +266,7 @@ class WebApp:
                             "expansions": final.get("expansions", 0), "insufficient": final.get("insufficient", False),
                             "trace": final.get("trace", [])})
             except Exception as e:           # 화면에는 짧은 설명만
-                logging.exception("질문 처리 실패")
+                log.exception("질문 처리 실패")
                 events.put({"type": "error", "message": f"처리 중 오류가 났습니다: {type(e).__name__}: {e}"})
             finally:
                 events.put(None)
@@ -329,7 +334,7 @@ def make_handler(web: WebApp):
             self.end_headers()
             try:
                 for ev in _chain(first, stream):
-                    self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
+                    self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):   # 브라우저가 닫힘: 흐름은 끝까지 돌고 결과는 버린다
                 for _ in stream:

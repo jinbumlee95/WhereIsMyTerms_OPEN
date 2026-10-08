@@ -22,6 +22,8 @@
 생성
 - answer: 검색한 조항·변경 이력을 번호 붙은 근거로 주고, 근거 안에서만 답하며 [C1] [H2] 처럼 인용하게 한다.
 """
+import calendar
+import datetime as _dt
 import json
 import math
 import random
@@ -30,6 +32,8 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
+
+import numpy as np
 
 from . import compare as C
 from . import index as I
@@ -54,8 +58,8 @@ DIVERSE_MIN = 2            # 회사를 가리지 않은 검색: 회사당 최소
 DIVERSE_K = 5              # k 가 이만큼 늘 때마다 회사당 1개씩 더 (k=15 → 3)
 # "전체 회사" 검색에서 뺄 문서: 서비스 수준 협약(SLA). 네이버 클라우드 플랫폼에만 77개가 있고 틀이 거의 같아서,
 # 전체 순위와 그 회사 몫을 SLA 가 차지한다. 회사를 고른 검색이나 SLA 를 직접 묻는 질문에서는 빼지 않는다.
-SLA_TITLE = re.compile(r"서비스\s*수준\s*협약|\bSLA\b", re.I)
-SLA_WORDS = re.compile(r"SLA|서비스\s*수준|가용\s*(률|성)|가동\s*률", re.I)
+SLA_TITLE = re.compile(r"서비스\s*수준\s*협약|\bSLA\b", re.IGNORECASE)
+SLA_WORDS = re.compile(r"SLA|서비스\s*수준|가용\s*(률|성)|가동\s*률", re.IGNORECASE)
 
 
 
@@ -170,7 +174,6 @@ class Corpus:
             idx = [self.pos[i] for i in ids]
             runs += [([self.entries[i]["id"] for i, _ in self.bm25.scores(q, idx)], BM25_WEIGHT) for q in queries]
         if mode in ("vector", "hybrid") and vecs is not None:
-            import numpy as np
             got = self.col().get(ids=ids, include=["embeddings"])
             m = np.asarray(got["embeddings"], dtype=float)
             m /= np.linalg.norm(m, axis=1, keepdims=True)
@@ -537,7 +540,6 @@ _DATE_PATTERNS = [
 
 def dates_in(query: str) -> tuple[str | None, str | None]:
     """질문 속 날짜 표현 -> (시작일, 끝일). 여러 개면 전부 덮는 기간. 코드로 뽑으므로 LLM 판단보다 우선한다."""
-    import calendar
     spans, used = [], []
     for pat, unit in _DATE_PATTERNS:
         for m in pat.finditer(query):
@@ -565,7 +567,6 @@ def dates_in(query: str) -> tuple[str | None, str | None]:
         elif _BEFORE.match(tail):
             d_from = None
             if not re.match(r"\s*까지", tail):          # "2020년 이전" 은 2020년을 빼고, "2020년까지" 는 넣는다
-                import datetime as _dt
                 d_to = (_dt.date.fromisoformat(spans[0][0]) - _dt.timedelta(days=1)).isoformat()
     return d_from, d_to
 

@@ -17,7 +17,7 @@ import threading
 from pathlib import Path
 
 from .pipeline import UNFAVORABLE
-from .score import is_list  # noqa: F401  (조각 판정과 채점 제외가 같은 기준을 쓴다)
+from .score import is_list
 from .services import doc_label, platform
 
 EMBED_MODEL = "dragonkue/snowflake-arctic-embed-l-v2.0-ko"   # 기본 (로컬, requirements-local.txt)

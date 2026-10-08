@@ -7,6 +7,7 @@ All source-bearing artifacts and vectors remain under reports/ and .cache/.
 import argparse
 import csv
 import hashlib
+import itertools
 import json
 import re
 import sqlite3
@@ -14,7 +15,10 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
+
 from . import repo
+from .index import EMBED_MODEL, LocalEmbedder
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "reports" / "chunk_ab"
@@ -37,7 +41,7 @@ def chunks(body, strategy):
     conf = CONFIG[strategy]
     starts = sorted({0, len(body), *(m.start() for m in SECTION.finditer(body))})
     result = []
-    for left, right in zip(starts, starts[1:]):
+    for left, right in itertools.pairwise(starts):
         title = body[left:right].split("\n", 1)[0][:160]
         boundaries = [m.end() + left for m in PARAGRAPH.finditer(body[left:right])]
         pos = left
@@ -167,7 +171,6 @@ def labelled_questions(corpus, out, sheet):
 
 
 def cached_vectors(conn, embedder, texts, query=False):
-    import numpy as np
     mode = "query" if query else "document"
     # Include settings that affect vectors, not just a model name.
     prefix = f"v1:{embedder.model}:{embedder.st.max_seq_length}:{embedder.st.prompts}:{mode}:"
@@ -254,7 +257,6 @@ def evidence_hit(record, spans, path):
 
 
 def evaluate(corpus, matrix, questions, qvectors, out, topk=5, budget=3000):
-    import numpy as np
     records = corpus["chunks"]
     rows = []
     for strategy in CONFIG:
@@ -332,8 +334,8 @@ def comparison_tables(corpus, rows, out):
             for kind in ('labelled', 'authored', 'diagnostic'):
                 for scope in ('company', 'document'):
                     count = len(groups[(level, name, kind, scope, 'A')])
-                    row = dict(name=name, kind=kind, scope=scope, questions=count,
-                               status='evaluated' if count else 'unassessed')
+                    row = {"name": name, "kind": kind, "scope": scope, "questions": count,
+                           "status": 'evaluated' if count else 'unassessed'}
                     for strategy in CONFIG:
                         group = groups[(level, name, kind, scope, strategy)]
                         if len(group) != count:
@@ -369,8 +371,7 @@ def comparison_tables(corpus, rows, out):
 
 
 def run(out=OUT, batch=4):
-    import numpy as np
-    from .index import EMBED_MODEL, LocalEmbedder
+
     corpus = json.loads((out / "corpus.json").read_text(encoding="utf-8"))
     if corpus["config"] != CONFIG:
         raise ValueError("Strategy changed; run prepare again")
@@ -412,8 +413,7 @@ def run(out=OUT, batch=4):
 
 def search(question, strategy, company=None, path=None, out=OUT, batch=4):
     """Use the experimental local vectors without changing the production index."""
-    import numpy as np
-    from .index import LocalEmbedder
+
     if not question.strip() or (not company and not path):
         raise ValueError('Provide a question and --company or --path')
     manifest = json.loads((out / 'run.json').read_text(encoding='utf-8'))

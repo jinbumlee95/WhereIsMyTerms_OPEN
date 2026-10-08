@@ -134,7 +134,7 @@ def serve(app: App, host: str = "127.0.0.1", port: int = 8765):
                         return self._send(200, app.answer(parts[2], int(parts[3]), b.get("answer", ""), b.get("memo", ""),
                                                           b.get("edit")))
                 if method == "POST" and parts == ["api", "label-compare"]:
-                    rows, summary = app.compare(self._body().get("scorer", "baseline"))
+                    _rows, summary = app.compare(self._body().get("scorer", "baseline"))
                     return self._send(200, summary)
                 self._send(404, {"error": "not found"})
             except (ValueError, IndexError) as e:
